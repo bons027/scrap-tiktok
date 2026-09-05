@@ -795,9 +795,10 @@ def get_output_csv_paths(base_output_name):
 
 def close_post_dialog(driver, search_url=None):
     """
-    Menutup modal dialog komentar dan memastikan browser tetap fokus
-    pada feed pencarian, TIDAK melompat atau me-reload dari beranda.
+    Menutup modal dialog komentar atau mengembalikan navigasi jika
+    browser terlempar ke halaman permalink/beranda, agar tetap fokus di feed pencarian.
     """
+    # 1. Tutup modal dialog jika ada di DOM
     try:
         driver.execute_script("""
             let dialog = document.querySelector('div[role="dialog"]');
@@ -810,7 +811,7 @@ def close_post_dialog(driver, search_url=None):
                 }
             }
         """)
-        time.sleep(0.6)
+        time.sleep(0.5)
     except Exception:
         pass
 
@@ -818,23 +819,27 @@ def close_post_dialog(driver, search_url=None):
         has_dialog = driver.execute_script("return !!document.querySelector('div[role=\"dialog\"]');")
         if has_dialog:
             ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-            time.sleep(0.6)
+            time.sleep(0.5)
     except Exception:
         pass
 
-    # Pastikan browser tidak redirect ke Beranda Utama (facebook.com/)
+    # 2. Cek apakah browser terlempar ke halaman permalink (/permalink/, /posts/, /photo/) atau beranda utama
     if search_url:
-        curr = driver.current_url.rstrip('/')
-        is_on_home = curr in ['https://www.facebook.com', 'https://www.facebook.com/', 'https://web.facebook.com', 'https://m.facebook.com']
-        if is_on_home:
-            print("  [*] Menjaga fokus tetap di feed pencarian grup/isu...")
+        curr = driver.current_url
+        is_trapped = (
+            '/permalink/' in curr or 
+            '/photo/' in curr or 
+            curr.rstrip('/') in ['https://www.facebook.com', 'https://www.facebook.com/', 'https://web.facebook.com', 'https://m.facebook.com']
+        )
+        if is_trapped:
+            print("  [*] Mengembalikan navigasi dari permalink/beranda ke feed pencarian...")
             try:
-                # Gunakan history back agar posisi scroll tetap terjaga
                 driver.back()
-                time.sleep(1.2)
+                time.sleep(1.8)
             except Exception:
                 pass
-            if driver.current_url.rstrip('/') in ['https://www.facebook.com', 'https://www.facebook.com/']:
+            # Jika setelah back masih belum kembali ke search, arahkan langsung ke search_url
+            if '/permalink/' in driver.current_url or '/photo/' in driver.current_url or driver.current_url.rstrip('/') in ['https://www.facebook.com', 'https://web.facebook.com']:
                 driver.get(search_url)
                 time.sleep(2.5)
 
@@ -843,9 +848,9 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
     """
     Workflow 4 Langkah Berurutan (Post per Post):
     1. Buka Keyword di Facebook Search Feed / Group Search.
-    2. Ambil postingan berikutnya di feed -> Klik Toggle Komentar.
+    2. Ambil postingan berikutnya di feed -> Klik Toggle Komentar (Bukan Permalink).
     3. Ubah filter 'Paling Relevan' menjadi 'Semua Komentar'.
-    4. Scroll kontainer komentar & bongkar balasan sampai HABIS -> Simpan CSV -> Tutup Dialog -> Lanjut Post Berikutnya!
+    4. Scroll kontainer komentar & bongkar balasan sampai HABIS -> Simpan CSV -> Tutup Dialog / Kembali ke Search -> Lanjut Post Berikutnya!
     """
     processed_signatures = set()
     total_posts_saved = 0
@@ -961,7 +966,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
         print(f"  \"{p_text[:75]}...\"")
         print("  [*] LANGKAH 2: Klik Toggle Komentar...")
 
-        # LANGKAH 2: KLIK TOGGLE KOMENTAR PADA POSTINGAN TERSEBUT SECARA PRESISI
+        # LANGKAH 2: KLIK TOGGLE KOMENTAR PADA POSTINGAN TERSEBUT SECARA PRESISI (HINDARI PERMALINK LINK)
         driver.execute_script("""
             let targetIdx = arguments[0];
             let feedNodes = document.querySelectorAll('div[role="feed"] > div, div[role="article"], div[data-ad-preview="message"], div[class*="x1yztbdb"]');
@@ -970,22 +975,31 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
 
             p.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
+            // 1. Cari tombol komentar spesifik
             let clickTargets = p.querySelectorAll(
                 'div[aria-label*="Komentar"], div[aria-label*="Comment"], div[aria-label*="komentar"], div[role="button"][tabindex="0"], span[dir="auto"]'
             );
 
             for (let el of clickTargets) {
+                // Hindari mengklik link anchor yang membungkus ke permalink luar
+                if (el.closest('a[href*="/permalink/"], a[href*="/posts/"], a[href*="/photo/"]')) {
+                    continue;
+                }
                 let txt = (el.innerText || el.textContent || '').toLowerCase();
                 let aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                if (aria.includes('komentar') || aria.includes('comment') || txt === 'komentar' || txt.includes('komentar')) {
+                if (aria.includes('komentar') || aria.includes('comment') || txt === 'komentar' || txt.includes('komentar') || txt.includes('balasan')) {
                     try { el.click(); return; } catch(e) {}
                 }
             }
 
-            try {
-                let msg = p.querySelector('div[dir="auto"]');
-                if (msg) msg.click();
-            } catch(e) {}
+            // 2. Fallback: Cari tombol role="button" di bagian bawah kartu postingan (Action Bar)
+            let bottomButtons = p.querySelectorAll('div[role="button"]');
+            for (let b of bottomButtons) {
+                let aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                if (aria.includes('komentar') || aria.includes('comment') || aria.includes('jawab')) {
+                    try { b.click(); return; } catch(e) {}
+                }
+            }
         """, dom_idx)
 
         time.sleep(random.uniform(2.0, 2.8))
@@ -1011,7 +1025,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
 
         print(f"  [+] Selesai Post #{total_posts_saved}. Total {len(post_comments)} komentar & balasan tersimpan!")
 
-        # Tutup dialog postingan dan pastikan tetap berada di feed pencarian
+        # Tutup dialog postingan dan pastikan kembali ke feed pencarian (bukan tertahan di permalink)
         close_post_dialog(driver, search_url=search_url)
         time.sleep(0.8)
         # Scroll feed pencarian ke bawah sedikit untuk memuat postingan berikutnya

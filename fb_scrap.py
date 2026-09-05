@@ -1,7 +1,7 @@
 import sys
-# Pastikan encoding output terminal mendukung karakter UTF-8 / emoji
+# Pastikan encoding output terminal mendukung karakter UTF-8 / emoji & flush instan
 try:
-    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
 except Exception:
     pass
 
@@ -292,7 +292,6 @@ def find_binary(filenames, subdirs):
 
 def get_driver():
     chrome_path = find_binary(["chrome.exe"], ["chrome-win64", "chrome", ""])
-    chromedriver_path = find_binary(["chromedriver.exe"], ["chromedriver-win64", "chromedriver", ""])
     base_dir = os.path.dirname(os.path.abspath(__file__))
     profile_dir = os.path.join(base_dir, "facebook_chrome_profile")
     os.makedirs(profile_dir, exist_ok=True)
@@ -302,8 +301,6 @@ def get_driver():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-notifications")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--lang=id-ID,id,en-US,en")
 
     driver_kwargs = {
         "options": options,
@@ -311,8 +308,6 @@ def get_driver():
     }
     if chrome_path:
         driver_kwargs["browser_executable_path"] = chrome_path
-    if chromedriver_path:
-        driver_kwargs["driver_executable_path"] = chromedriver_path
 
     driver = uc.Chrome(**driver_kwargs)
 
@@ -1063,19 +1058,30 @@ def run_live_interactive_sniffer():
 
 
 # ==========================================
-# 7. MENU UTAMA
+# 7. MENU UTAMA (MENDUKUNG CLI & INTERAKTIF)
 # ==========================================
 def run_facebook_scraper():
-    print("=" * 65)
-    print("       FACEBOOK REGIONAL INTELLIGENCE SCRAPER (HUMAS BUPATI)")
-    print("=" * 65)
-    print("PILIHAN MENU:")
-    print("  0. Setup & Simpan Sesi Login Facebook (Cukup Login 1 Kali)")
-    print("  1. Pencarian Otomatis Kata Kunci Isu Daerah (4 Langkah Otomatis Penuh)")
-    print("  2. Monitoring Otomatis Grup Facebook Warga (Berdasarkan groups.txt)")
-    print("  3. Mode Live Interceptor (Bebas Scroll/Klik FB, Script Otomatis Sedot Komentar)")
-    print("=" * 65)
-    mode = input("Pilih menu [0/1/2/3] (default: 1): ").strip() or "1"
+    import argparse
+    parser = argparse.ArgumentParser(description="Facebook Regional Intelligence Scraper (Humas Bupati)")
+    parser.add_argument("--mode", type=str, choices=["0", "1", "2", "3"], help="Mode scraper (0=Setup, 1=Keywords, 2=Groups, 3=Live)")
+    parser.add_argument("--output", type=str, help="Nama prefix file output")
+    parser.add_argument("--keyword", type=str, help="Kata kunci tunggal pencarian")
+    parser.add_argument("--max-posts", type=int, help="Maksimal postingan per kata kunci")
+    parser.add_argument("--max-comments", type=int, help="Maksimal komentar per postingan")
+    args, unknown = parser.parse_known_args()
+
+    mode = args.mode
+    if not mode:
+        print("=" * 65)
+        print("       FACEBOOK REGIONAL INTELLIGENCE SCRAPER (HUMAS BUPATI)")
+        print("=" * 65)
+        print("PILIHAN MENU:")
+        print("  0. Setup & Simpan Sesi Login Facebook (Cukup Login 1 Kali)")
+        print("  1. Pencarian Otomatis Kata Kunci Isu Daerah (4 Langkah Otomatis Penuh)")
+        print("  2. Monitoring Otomatis Grup Facebook Warga (Berdasarkan groups.txt)")
+        print("  3. Mode Live Interceptor (Bebas Scroll/Klik FB, Script Otomatis Sedot Komentar)")
+        print("=" * 65)
+        mode = input("Pilih menu [0/1/2/3] (default: 1): ").strip() or "1"
 
     if mode == "0":
         setup_facebook_session()
@@ -1086,19 +1092,24 @@ def run_facebook_scraper():
 
     keywords = []
     groups = []
-    base_output_name = "fb_isu_daerah"
-    max_posts_target = 20
-    max_comments_limit = 150
+    base_output_name = args.output or "fb_isu_daerah"
+    max_posts_target = args.max_posts or 20
+    max_comments_limit = args.max_comments or 150
 
     if mode == "1":
-        keywords = load_keywords("keywords.txt")
+        if args.keyword:
+            keywords = [args.keyword]
+        else:
+            keywords = load_keywords("keywords.txt")
         print(f"\n[*] Memuat {len(keywords)} kata kunci: {', '.join(keywords)}")
-        base_output_name = input("Nama file output (default: fb_isu_daerah): ").strip() or "fb_isu_daerah"
-        try:
-            p_in = input("Maksimal postingan per kata kunci (default: 20): ").strip()
-            max_posts_target = int(p_in) if p_in else 20
-        except ValueError:
-            max_posts_target = 20
+        if not args.output:
+            base_output_name = input("Nama file output (default: fb_isu_daerah): ").strip() or "fb_isu_daerah"
+        if not args.max_posts:
+            try:
+                p_in = input("Maksimal postingan per kata kunci (default: 20): ").strip()
+                max_posts_target = int(p_in) if p_in else 20
+            except ValueError:
+                max_posts_target = 20
 
     elif mode == "2":
         groups = load_groups("groups.txt")
@@ -1109,8 +1120,9 @@ def run_facebook_scraper():
 
         print("Pilihan Metode Grup:\n  A. Kata Kunci di keywords.txt\n  B. Feed Terbaru")
         m_grp = input("Pilih [A/B] (default: A): ").strip().upper() or "A"
-        keywords = load_keywords("keywords.txt") if m_grp == "A" else ["Feed Terbaru"]
-        base_output_name = input("Nama file output (default: fb_grup_monitoring): ").strip() or "fb_grup_monitoring"
+        keywords = [args.keyword] if args.keyword else (load_keywords("keywords.txt") if m_grp == "A" else ["Feed Terbaru"])
+        if not args.output:
+            base_output_name = input("Nama file output (default: fb_grup_monitoring): ").strip() or "fb_grup_monitoring"
 
     if base_output_name.endswith(".csv"):
         base_output_name = base_output_name[:-4]
@@ -1164,3 +1176,4 @@ def run_facebook_scraper():
 
 if __name__ == "__main__":
     run_facebook_scraper()
+

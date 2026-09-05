@@ -844,13 +844,79 @@ def close_post_dialog(driver, search_url=None):
                 time.sleep(2.5)
 
 
+def apply_recent_posts_filter(driver):
+    """
+    Mengaktifkan filter 'Postingan terbaru' / 'Recent posts' pada feed pencarian Facebook atau grup.
+    Mendukung tombol toggle, radio button, dan sidebar filter Facebook.
+    """
+    try:
+        clicked = driver.execute_script("""
+            // 1. Cari elemen switch / radio / button dengan teks 'Postingan terbaru' atau 'Recent posts'
+            let elements = Array.from(document.querySelectorAll(
+                'div[role="switch"], div[role="radio"], input[type="checkbox"], input[type="radio"], div[role="button"], span[dir="auto"], div[aria-label], label'
+            ));
+
+            for (let el of elements) {
+                let txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                let aria = (el.getAttribute('aria-label') || '').toLowerCase();
+
+                let isRecent = (
+                    txt === 'postingan terbaru' || 
+                    txt === 'recent posts' || 
+                    txt.includes('postingan terbaru') || 
+                    txt.includes('recent posts') || 
+                    aria.includes('postingan terbaru') || 
+                    aria.includes('recent posts') ||
+                    txt === 'terbaru' ||
+                    txt === 'terkini'
+                );
+
+                if (isRecent) {
+                    let isChecked = el.getAttribute('aria-checked') === 'true' || el.checked === true;
+                    if (!isChecked) {
+                        let clickTarget = el.closest('div[role="switch"], div[role="radio"], label, div[role="button"]') || el;
+                        try {
+                            clickTarget.click();
+                            return true;
+                        } catch(e) {}
+                    } else {
+                        return true; // sudah aktif
+                    }
+                }
+            }
+
+            // 2. Cari di sidebar filter kiri (Filter Pencarian)
+            let sidebars = Array.from(document.querySelectorAll('div[aria-label*="Filter"], div[role="complementary"], div[role="navigation"]'));
+            for (let sb of sidebars) {
+                let items = sb.querySelectorAll('div[role="button"], div[role="radio"], span, label');
+                for (let it of items) {
+                    let st = (it.innerText || it.textContent || '').trim().toLowerCase();
+                    if (st === 'postingan terbaru' || st === 'recent posts' || st.includes('postingan terbaru')) {
+                        try {
+                            it.click();
+                            return true;
+                        } catch(e) {}
+                    }
+                }
+            }
+            return false;
+        """)
+        if clicked:
+            print("  [*] Filter 'Postingan Terbaru' berhasil diaktifkan!")
+            time.sleep(2.5)
+        return clicked
+    except Exception:
+        return False
+
+
 def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20, max_comments_per_post=150, custom_search_url=None, group_name=None):
     """
     Workflow 4 Langkah Berurutan (Post per Post):
     1. Buka Keyword di Facebook Search Feed / Group Search.
-    2. Ambil postingan berikutnya di feed -> Klik Toggle Komentar (Bukan Permalink).
-    3. Ubah filter 'Paling Relevan' menjadi 'Semua Komentar'.
-    4. Scroll kontainer komentar & bongkar balasan sampai HABIS -> Simpan CSV -> Tutup Dialog / Kembali ke Search -> Lanjut Post Berikutnya!
+    2. Aktifkan Filter 'Postingan Terbaru'.
+    3. Ambil postingan berikutnya di feed -> Klik Toggle Komentar (Bukan Permalink).
+    4. Ubah filter 'Paling Relevan' menjadi 'Semua Komentar'.
+    5. Scroll kontainer komentar & bongkar balasan sampai HABIS -> Simpan CSV -> Tutup Dialog / Kembali ke Search -> Lanjut Post Berikutnya!
     """
     processed_signatures = set()
     total_posts_saved = 0
@@ -865,6 +931,9 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
     print(f"    - Postingan: {post_csv}")
     print(f"    - Komentar : {comment_csv}")
     print("=" * 65)
+
+    # Coba aktifkan filter 'Postingan Terbaru' jika tombol tersedia
+    apply_recent_posts_filter(driver)
 
     while total_posts_saved < max_posts and empty_scrolls < 8:
         # Pastikan modal dialog tertutup dan tetap di halaman pencarian

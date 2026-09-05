@@ -773,32 +773,78 @@ def exhaustively_scroll_and_extract_comments(driver, max_idle_scrolls=4, max_tot
     return collected_for_post
 
 
-def close_post_dialog(driver):
+# Folder output default untuk menyimpan seluruh file CSV hasil scraping
+RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+
+def get_output_csv_paths(base_output_name):
+    if not base_output_name:
+        base_output_name = "fb_isu_daerah"
+    if base_output_name.endswith(".csv"):
+        base_output_name = base_output_name[:-4]
+
+    if os.path.isabs(base_output_name) or os.path.dirname(base_output_name):
+        post_csv = f"{base_output_name}_posts.csv"
+        comment_csv = f"{base_output_name}_comments.csv"
+    else:
+        post_csv = os.path.join(RESULTS_DIR, f"{base_output_name}_posts.csv")
+        comment_csv = os.path.join(RESULTS_DIR, f"{base_output_name}_comments.csv")
+    return post_csv, comment_csv
+
+
+def close_post_dialog(driver, search_url=None):
+    """
+    Menutup modal dialog komentar dan memastikan browser tetap fokus
+    pada feed pencarian, TIDAK melompat atau me-reload dari beranda.
+    """
     try:
         driver.execute_script("""
-            let closeBtn = document.querySelector('div[aria-label="Tutup"], div[aria-label="Close"], svg[aria-label="Tutup"]');
-            if (closeBtn) {
-                closeBtn.closest('div[role="button"], span')?.click() || closeBtn.click();
+            let dialog = document.querySelector('div[role="dialog"]');
+            if (dialog) {
+                let closeBtn = dialog.querySelector(
+                    'div[aria-label="Tutup"], div[aria-label="Close"], svg[aria-label="Tutup"], div[role="button"][aria-label*="Tutup"], div[role="button"][aria-label*="Close"]'
+                );
+                if (closeBtn) {
+                    closeBtn.closest('div[role="button"], span')?.click() || closeBtn.click();
+                }
             }
         """)
-        time.sleep(0.8)
+        time.sleep(0.6)
     except Exception:
         pass
 
     try:
-        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-        time.sleep(0.8)
+        has_dialog = driver.execute_script("return !!document.querySelector('div[role=\"dialog\"]');")
+        if has_dialog:
+            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+            time.sleep(0.6)
     except Exception:
         pass
+
+    # Pastikan browser tidak redirect ke Beranda (facebook.com/)
+    if search_url:
+        curr = driver.current_url.rstrip('/')
+        if 'search/posts' not in curr and 'search' not in curr:
+            print("  [*] Menjaga fokus tetap di feed pencarian...")
+            try:
+                # Gunakan history back agar posisi scroll tetap terjaga
+                driver.back()
+                time.sleep(1.2)
+            except Exception:
+                pass
+            if 'search/posts' not in driver.current_url and 'search' not in driver.current_url:
+                driver.get(search_url)
+                time.sleep(2.5)
 
 
 def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20, max_comments_per_post=150):
     """
     Workflow 4 Langkah Berurutan (Post per Post):
-    1. Cari Keyword di Facebook Search.
+    1. Buka Keyword di Facebook Search Feed.
     2. Ambil postingan berikutnya di feed -> Klik Toggle Komentar.
     3. Ubah filter 'Paling Relevan' menjadi 'Semua Komentar'.
-    4. Scroll kontainer komentar & bongkar balasan sampai HABIS -> Simpan CSV -> Lanjut ke postingan berikutnya!
+    4. Scroll kontainer komentar & bongkar balasan sampai HABIS -> Simpan CSV -> Tutup Dialog -> Lanjut Post Berikutnya!
     """
     processed_signatures = set()
     total_posts_saved = 0
@@ -808,17 +854,14 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
 
     print(f"\n" + "=" * 65)
     print(f"[*] LANGKAH 1: Memproses Pencarian Kata Kunci: '{keyword}'")
+    print(f"[*] Lokasi Penyimpanan Hasil:")
+    print(f"    - Postingan: {post_csv}")
+    print(f"    - Komentar : {comment_csv}")
     print("=" * 65)
 
-    while total_posts_saved < max_posts and empty_scrolls < 7:
-        # Pastikan URL tetap di halaman pencarian
-        if 'search/posts' not in driver.current_url:
-            print("  [*] Mengarahkan kembali ke halaman pencarian feed...")
-            driver.get(search_url)
-            time.sleep(3.5)
-
-        # Pastikan modal dialog lama tertutup
-        close_post_dialog(driver)
+    while total_posts_saved < max_posts and empty_scrolls < 8:
+        # Pastikan modal dialog tertutup dan tetap di halaman pencarian
+        close_post_dialog(driver, search_url=search_url)
 
         # Cari postingan berikutnya yang belum diproses dari feed
         next_post = driver.execute_script("""
@@ -883,11 +926,11 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
             return null;
         """, list(processed_signatures))
 
-        # Jika belum ada postingan baru di layar, scroll feed luar ke bawah
+        # Jika belum ada postingan baru di layar, scroll feed pencarian ke bawah
         if not next_post:
             empty_scrolls += 1
-            perform_feed_scroll(driver, distance=750)
-            time.sleep(random.uniform(2.5, 3.8))
+            perform_feed_scroll(driver, distance=650)
+            time.sleep(random.uniform(2.0, 3.2))
             continue
 
         # Postingan baru ditemukan
@@ -912,9 +955,9 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
         print("\n" + "=" * 65)
         print(f"[POST #{total_posts_saved}/{max_posts}] @{p_author} ({p_date})")
         print(f"  \"{p_text[:75]}...\"")
-        print("  [*] LANGKAH 2: Klik Toggle Komentar...")
+        print("  [*] LANGKAH 2: Klik Toggle Komentar (Tetap di Halaman Pencarian)...")
 
-        # LANGKAH 2: KLIK TOGGLE KOMENTAR PADA POSTINGAN TERSEBUT
+        # LANGKAH 2: KLIK TOGGLE KOMENTAR PADA POSTINGAN TERSEBUT SECARA PRESISI
         driver.execute_script("""
             let targetIdx = arguments[0];
             let feedNodes = document.querySelectorAll('div[role="feed"] > div, div[role="article"], div[data-ad-preview="message"], div[class*="x1yztbdb"]');
@@ -924,13 +967,13 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
             p.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
             let clickTargets = p.querySelectorAll(
-                'div[aria-label*="Komentar"], div[aria-label*="Comment"], a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], abbr, div[role="button"]'
+                'div[aria-label*="Komentar"], div[aria-label*="Comment"], div[aria-label*="komentar"], div[role="button"][tabindex="0"], span[dir="auto"]'
             );
 
             for (let el of clickTargets) {
                 let txt = (el.innerText || el.textContent || '').toLowerCase();
                 let aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                if (txt.includes('komentar') || txt.includes('comment') || aria.includes('komentar') || aria.includes('comment') || el.tagName === 'ABBR' || el.tagName === 'A') {
+                if (aria.includes('komentar') || aria.includes('comment') || txt === 'komentar' || txt.includes('komentar')) {
                     try { el.click(); return; } catch(e) {}
                 }
             }
@@ -941,7 +984,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
             } catch(e) {}
         """, dom_idx)
 
-        time.sleep(random.uniform(2.2, 3.0))
+        time.sleep(random.uniform(2.0, 2.8))
 
         # LANGKAH 3: UBAH FILTER MENJADI SEMUA KOMENTAR
         print("  [*] LANGKAH 3: Mengubah Filter Menjadi 'Semua Komentar'...")
@@ -964,13 +1007,14 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
 
         print(f"  [+] Selesai Post #{total_posts_saved}. Total {len(post_comments)} komentar & balasan tersimpan!")
 
-        # Tutup dialog postingan dan lanjut ke postingan berikutnya
-        close_post_dialog(driver)
-        time.sleep(1.0)
+        # Tutup dialog postingan dan pastikan tetap berada di feed pencarian
+        close_post_dialog(driver, search_url=search_url)
+        time.sleep(0.8)
+        # Scroll feed pencarian ke bawah sedikit untuk memuat postingan berikutnya
         perform_feed_scroll(driver, distance=400)
-        time.sleep(1.5)
+        time.sleep(1.2)
 
-    print(f"\n[*] Selesai pencarian '{keyword}'. Total {total_posts_saved} post & {total_comments_saved} komentar tersimpan.")
+    print(f"\n[*] Selesai pencarian '{keyword}'. Total {total_posts_saved} post & {total_comments_saved} komentar tersimpan di '{comment_csv}'.")
 
 
 # ==========================================
@@ -984,14 +1028,14 @@ def run_live_interactive_sniffer():
     print("1. Browser Facebook akan terbuka dengan sesi login Anda.")
     print("2. Anda bebas membuka postingan, grup, mencari isu, atau mengklik komentar apa saja.")
     print("3. Script di background akan OTOMATIS MENYEDOT dan MENYIMPAN seluruh komentar & balasan")
-    print("   yang muncul di layar (via XHR/GraphQL & DOM) langsung ke CSV!")
+    print("   yang muncul di layar (via XHR/GraphQL & DOM) langsung ke CSV di folder 'results/'!")
     print("=" * 65)
 
     base_name = input("Nama file output CSV (default: fb_live_comments): ").strip() or "fb_live_comments"
     if base_name.endswith(".csv"):
         base_name = base_name[:-4]
 
-    comment_csv = f"{base_name}.csv"
+    comment_csv = os.path.join(RESULTS_DIR, f"{base_name}.csv")
     init_comments_csv(comment_csv)
     print(f"[*] Komentar & balasan akan otomatis disimpan ke: {comment_csv}")
 
@@ -1092,7 +1136,7 @@ def run_facebook_scraper():
 
     keywords = []
     groups = []
-    base_output_name = args.output or "fb_isu_daerah"
+    base_output_name = args.output or ""
     max_posts_target = args.max_posts or 20
     max_comments_limit = args.max_comments or 150
 
@@ -1102,7 +1146,7 @@ def run_facebook_scraper():
         else:
             keywords = load_keywords("keywords.txt")
         print(f"\n[*] Memuat {len(keywords)} kata kunci: {', '.join(keywords)}")
-        if not args.output:
+        if not base_output_name:
             base_output_name = input("Nama file output (default: fb_isu_daerah): ").strip() or "fb_isu_daerah"
         if not args.max_posts:
             try:
@@ -1121,14 +1165,10 @@ def run_facebook_scraper():
         print("Pilihan Metode Grup:\n  A. Kata Kunci di keywords.txt\n  B. Feed Terbaru")
         m_grp = input("Pilih [A/B] (default: A): ").strip().upper() or "A"
         keywords = [args.keyword] if args.keyword else (load_keywords("keywords.txt") if m_grp == "A" else ["Feed Terbaru"])
-        if not args.output:
+        if not base_output_name:
             base_output_name = input("Nama file output (default: fb_grup_monitoring): ").strip() or "fb_grup_monitoring"
 
-    if base_output_name.endswith(".csv"):
-        base_output_name = base_output_name[:-4]
-
-    post_csv = f"{base_output_name}_posts.csv"
-    comment_csv = f"{base_output_name}_comments.csv"
+    post_csv, comment_csv = get_output_csv_paths(base_output_name)
     init_posts_csv(post_csv)
     init_comments_csv(comment_csv)
 
@@ -1146,7 +1186,7 @@ def run_facebook_scraper():
             for kw in keywords:
                 search_url = f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(kw)}"
                 driver.get(search_url)
-                time.sleep(4)
+                time.sleep(3.5)
                 process_search_workflow(driver, kw, post_csv, comment_csv, max_posts=max_posts_target, max_comments_per_post=max_comments_limit)
 
         elif mode == "2":
@@ -1155,11 +1195,12 @@ def run_facebook_scraper():
                 for kw in keywords:
                     target_url = f"{grp_clean}/?sorting_setting=CHRONOLOGICAL" if kw == "Feed Terbaru" else f"{grp_clean}/search/?q={urllib.parse.quote(kw)}"
                     driver.get(target_url)
-                    time.sleep(4)
+                    time.sleep(3.5)
                     process_search_workflow(driver, f"{grp_clean.split('/')[-1]} | {kw}", post_csv, comment_csv, max_posts=max_posts_target, max_comments_per_post=max_comments_limit)
 
         print("\n" + "=" * 65)
         print("  [SELESAI] Scraping Facebook Berhasil Selesai Penuh!")
+        print(f"  * Folder Output  : results/")
         print(f"  * File Postingan : {post_csv}")
         print(f"  * File Komentar  : {comment_csv}")
         print("  * Analisis Sentimen & Topik: Jalankan 'python app.py'")
@@ -1176,4 +1217,5 @@ def run_facebook_scraper():
 
 if __name__ == "__main__":
     run_facebook_scraper()
+
 

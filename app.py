@@ -155,20 +155,27 @@ class AppHandler(BaseHTTPRequestHandler):
         # 1. API: List Files
         if path == "/api/files":
             files = []
-            for f in glob.glob(os.path.join(BASE_DIR, "*.csv")):
-                fname = os.path.basename(f)
-                if fname.startswith("."):
-                    continue
-                try:
-                    sample = pd.read_csv(f, nrows=2)
-                    has_analysis = any(c in sample.columns for c in ["sentiment", "sentiment_score", "sentiment_analysis_result", "label"])
-                except Exception:
-                    has_analysis = False
-                files.append({
-                    "filename": fname,
-                    "is_analyzed": has_analysis,
-                    "has_summary": os.path.exists(f.replace(".csv", "_summary.txt"))
-                })
+            seen_files = set()
+            search_patterns = [
+                os.path.join(BASE_DIR, "*.csv"),
+                os.path.join(BASE_DIR, "results", "*.csv")
+            ]
+            for pat in search_patterns:
+                for f in glob.glob(pat):
+                    fname = os.path.basename(f)
+                    if fname.startswith(".") or fname in seen_files:
+                        continue
+                    seen_files.add(fname)
+                    try:
+                        sample = pd.read_csv(f, nrows=2)
+                        has_analysis = any(c in sample.columns for c in ["sentiment", "sentiment_score", "sentiment_analysis_result", "label"])
+                    except Exception:
+                        has_analysis = False
+                    files.append({
+                        "filename": fname,
+                        "is_analyzed": has_analysis,
+                        "has_summary": os.path.exists(f.replace(".csv", "_summary.txt"))
+                    })
             # Urutkan agar file yang sudah dianalisis berada di paling atas
             files.sort(key=lambda x: (not x["is_analyzed"], x["filename"]))
             self.send_json({"files": files})
@@ -180,8 +187,8 @@ class AppHandler(BaseHTTPRequestHandler):
             if not fname:
                 self.send_json({"error": "Parameter file wajib diisi"}, status=400)
                 return
-            fpath = os.path.join(BASE_DIR, fname)
-            if not os.path.exists(fpath):
+            fpath = find_csv_path(fname)
+            if not fpath or not os.path.exists(fpath):
                 self.send_json({"error": "File tidak ditemukan"}, status=404)
                 return
                 
@@ -328,8 +335,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Nama file wajib diisi"}, status=400)
                 return
 
-            filepath = os.path.join(BASE_DIR, filename)
-            if not os.path.exists(filepath):
+            filepath = find_csv_path(filename)
+            if not filepath or not os.path.exists(filepath):
                 self.send_json({"error": "File tidak ditemukan"}, status=404)
                 return
 

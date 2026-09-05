@@ -41,6 +41,18 @@ ENV/
 *.swp
 *.swo
 
-# Environment Variables
+# Environment Variables & Secrets
 .env
 .env.local
+
+# Scraper Profiles & Sessions (Sensitive Login Data)
+tiktok_chrome_profile/
+facebook_chrome_profile/
+*.pkl
+
+# Test Logs & Action Recordings
+user_recorded_actions.json
+
+# Data outputs (CSV & Summary)
+*.csv
+*_summary.txt

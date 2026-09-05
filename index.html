@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TikTok Public Opinion & Sentiment AI Dashboard</title>
+    <meta name="description" content="Dashboard intelijen sentimen publik dan pemetaan isu hangat TikTok berbasis Google Gemini AI.">
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-layout">
+        <!-- SIDEBAR -->
+        <aside class="sidebar">
+            <div class="sidebar-brand">
+                <div class="brand-icon">⚡</div>
+                <div class="brand-text">
+                    <h2>TikTok Intelligence</h2>
+                    <span>IndoBERT & Gemini AI</span>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <label for="select-file" class="section-label">Pilih Data Komentar</label>
+                <select id="select-file" class="custom-select">
+                    <option value="">Memuat data...</option>
+                </select>
+            </div>
+
+            <div class="sidebar-section">
+                <input type="file" id="file-uploader" accept=".csv" style="display: none;">
+                <button id="btn-upload-colab" class="btn btn-primary btn-block">
+                    <span>📤</span> Upload CSV Hasil Colab
+                </button>
+                <a href="https://colab.research.google.com/" target="_blank" class="btn btn-colab btn-block">
+                    <span>📓</span> Buka Google Colab
+                </a>
+            </div>
+
+            <div class="sidebar-section">
+                <label for="input-api-key" class="section-label">Opsi: Analisis Gemini Lokal</label>
+                <div class="api-key-wrapper">
+                    <input type="password" id="input-api-key" placeholder="Sudah tersimpan di .env" class="custom-input">
+                </div>
+                <button id="btn-analyze" class="btn btn-secondary btn-block" style="margin-top: 6px;">
+                    <span class="btn-icon">⚡</span>
+                    <span id="btn-analyze-text">Analisis dengan Gemini</span>
+                </button>
+            </div>
+
+            <!-- PROGRES ANALISIS -->
+            <div id="progress-box" class="progress-box" style="display: none;">
+                <div class="progress-header">
+                    <span id="progress-label">Menganalisis...</span>
+                    <span id="progress-val">0%</span>
+                </div>
+                <div class="progress-bar-bg">
+                    <div id="progress-bar-fill" class="progress-bar-fill"></div>
+                </div>
+                <p id="progress-sub" class="progress-sub">Menghubungi Google Gemini...</p>
+            </div>
+
+            <div class="sidebar-footer">
+                <p>Status: <span id="server-status" class="badge-online">Online (Lokal)</span></p>
+                <small>© 2026 TikTok Opinion AI</small>
+            </div>
+        </aside>
+
+        <!-- MAIN CONTENT AREA -->
+        <main class="main-content">
+            <!-- HEADER -->
+            <header class="top-header">
+                <div>
+                    <h1 class="page-title" id="active-file-title">Pilih File untuk Memulai</h1>
+                    <p class="page-subtitle">Analisis Sentimen, Pemetaan Isu Hangat, dan Rangkuman Keluhan Warga</p>
+                </div>
+                <div class="header-actions">
+                    <button id="btn-export-csv" class="btn btn-secondary" disabled>
+                        <span>📥</span> Unduh CSV
+                    </button>
+                </div>
+            </header>
+
+            <!-- EXECUTIVE AI BRIEF CARD -->
+            <section id="ai-summary-card" class="glass-card ai-summary-card" style="display: none;">
+                <div class="ai-card-badge">
+                    <span class="sparkle">✨</span> Ringkasan Eksekutif AI (Executive Brief)
+                </div>
+                <div id="ai-summary-text" class="ai-summary-body">
+                    Memuat ringkasan...
+                </div>
+            </section>
+
+            <!-- KPI STATS CARDS -->
+            <section class="stats-grid">
+                <div class="stat-card">
+                    <span class="stat-label">Total Komentar</span>
+                    <h2 id="stat-total" class="stat-number">0</h2>
+                    <span class="stat-sub">Volume opini publik</span>
+                </div>
+                <div class="stat-card border-pos">
+                    <span class="stat-label">Sentimen Positif</span>
+                    <h2 id="stat-pos" class="stat-number text-pos">0%</h2>
+                    <span id="stat-pos-count" class="stat-sub">0 komentar</span>
+                </div>
+                <div class="stat-card border-neu">
+                    <span class="stat-label">Sentimen Netral</span>
+                    <h2 id="stat-neu" class="stat-number text-neu">0%</h2>
+                    <span id="stat-neu-count" class="stat-sub">0 komentar</span>
+                </div>
+                <div class="stat-card border-neg">
+                    <span class="stat-label">Sentimen Negatif</span>
+                    <h2 id="stat-neg" class="stat-number text-neg">0%</h2>
+                    <span id="stat-neg-count" class="stat-sub">0 komentar</span>
+                </div>
+                <div class="stat-card border-net">
+                    <span class="stat-label">Net Sentiment (NPS)</span>
+                    <h2 id="stat-nps" class="stat-number text-net">+0.0</h2>
+                    <span class="stat-sub">% Positif - % Negatif</span>
+                </div>
+            </section>
+
+            <!-- CHARTS SECTION -->
+            <section class="charts-grid">
+                <div class="glass-card chart-card">
+                    <div class="card-header">
+                        <h3>Proporsi Sentimen</h3>
+                        <span class="badge-tag">Persentase</span>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="chart-sentiment"></canvas>
+                    </div>
+                </div>
+
+                <div class="glass-card chart-card">
+                    <div class="card-header">
+                        <h3>Topik & Isu Hangat Terbanyak</h3>
+                        <span class="badge-tag">Volume Isu</span>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="chart-topics"></canvas>
+                    </div>
+                </div>
+            </section>
+
+            <!-- CROSS ANALYSIS CHART -->
+            <section class="glass-card chart-card-wide">
+                <div class="card-header">
+                    <h3>Sentimen per Kategori Isu (Analisis Silang)</h3>
+                    <span class="badge-tag">Korelasi Topik vs Sentimen Warga</span>
+                </div>
+                <div class="chart-container-wide">
+                    <canvas id="chart-cross"></canvas>
+                </div>
+            </section>
+
+            <!-- DATA TABLE SECTION -->
+            <section class="glass-card table-section">
+                <div class="table-controls">
+                    <div class="search-box">
+                        <span class="search-icon">🔍</span>
+                        <input type="text" id="search-input" placeholder="Cari komentar, akun, atau keluhan warga..." class="custom-input">
+                    </div>
+                    <div class="filter-group">
+                        <select id="filter-sentiment" class="custom-select-small">
+                            <option value="ALL">Semua Sentimen</option>
+                            <option value="Positif">Positif Saja</option>
+                            <option value="Netral">Netral Saja</option>
+                            <option value="Negatif">Negatif Saja (Keluhan)</option>
+                        </select>
+                        <select id="filter-topic" class="custom-select-small">
+                            <option value="ALL">Semua Topik Isu</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="table-wrapper">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Sentimen</th>
+                                <th>Kategori Isu</th>
+                                <th>Intisari Pesan</th>
+                                <th>Isi Komentar Warga</th>
+                                <th>Likes</th>
+                                <th>Pengguna</th>
+                            </tr>
+                        </thead>
+                        <tbody id="comments-tbody">
+                            <tr>
+                                <td colspan="6" class="text-center py-4">Memuat data komentar...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="table-footer">
+                    <span id="table-info">Menampilkan 0 data</span>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

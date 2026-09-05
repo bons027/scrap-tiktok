@@ -1,0 +1,11 @@
+# ==============================================================================
+# DAFTAR LINK / ID GRUP FACEBOOK TARGET MONITORING HUMAS
+# ==============================================================================
+# Masukkan 1 link grup per baris. Baris yang diawali '#' akan diabaikan.
+# Contoh format:
+# https://www.facebook.com/groups/namagrupwarga
+# https://www.facebook.com/groups/123456789012345
+# ==============================================================================
+
+# Tambahkan link grup Facebook daerah Anda di bawah ini:
+https://www.facebook.com/groups/kabarklaten

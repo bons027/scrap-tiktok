@@ -9,12 +9,15 @@ import time
 import json
 import csv
 import os
+import random
 import urllib.parse
 from datetime import datetime
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 
 # Patch untuk mencegah bug WinError 6 pada Windows saat shutdown undetected-chromedriver
 uc.Chrome.__del__ = lambda self: None
@@ -62,18 +65,140 @@ window.XMLHttpRequest = new Proxy(OrigXMLHttpRequest, {
 """
 
 # ==========================================
-# 2. FUNGSI LOGIN & MODAL DISMISS
+# 2. FUNGSI LOGIN, ERROR HANDLING & SCROLLING
 # ==========================================
+def ensure_page_loaded(driver, max_wait=8):
+    """
+    Memastikan halaman tidak macet di pesan error 'Unknown error' / 'Something went wrong'.
+    Otomatis mencari dan mengklik tombol 'Try again' / 'Coba lagi' / 'Refresh'.
+    Jika masih macet, melakukan refresh halaman secara otomatis.
+    """
+    start_time = time.time()
+    last_status = 'OK'
+    while time.time() - start_time < max_wait:
+        try:
+            status = driver.execute_script("""
+                // 1. Cek tombol Try again / Coba lagi / Refresh
+                const elements = Array.from(document.querySelectorAll('button, [role="button"], a, div[class*="Button"]'));
+                for (const el of elements) {
+                    const text = (el.innerText || el.textContent || '').toLowerCase().trim();
+                    if (text === 'try again' || text === 'coba lagi' || text === 'refresh' || text === 'muat ulang') {
+                        if (el.offsetParent !== null) {
+                            el.click();
+                            return 'CLICKED_RETRY';
+                        }
+                    }
+                }
+                
+                // 2. Cek teks error pada halaman
+                const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
+                const hasError = bodyText.includes('something went wrong') || 
+                                 bodyText.includes('unknown error') || 
+                                 bodyText.includes('terjadi kesalahan') ||
+                                 bodyText.includes('tidak dapat memuat konten');
+                if (hasError) return 'HAS_ERROR';
+                return 'OK';
+            """)
+            last_status = status
+
+            if status == 'CLICKED_RETRY':
+                print("    [*] Terdeteksi tombol 'Try again' / 'Coba lagi'. Berhasil diklik otomatis!")
+                time.sleep(3)
+                return True
+            elif status == 'OK':
+                return True
+        except Exception:
+            pass
+        time.sleep(1.5)
+
+    if last_status == 'HAS_ERROR':
+        print("    [!] Halaman masih menampilkan error. Melakukan refresh otomatis...")
+        try:
+            driver.refresh()
+            time.sleep(4)
+        except Exception:
+            pass
+        return True
+    return True
+
+def perform_human_scroll(driver, distance=800):
+    """
+    Melakukan scroll multi-metode:
+    1. Real Mouse Wheel Action via Selenium ActionChains (sama persis seperti gerakan scroll mouse fisik).
+    2. JS Container Scroll (mencari elemen dengan overflow-y / scrollHeight > clientHeight).
+    3. Keyboard Page Down / Up jika jarak scroll besar.
+    """
+    # 1. Real Mouse Wheel (ActionChains) - meniru gerakan roda mouse fisik yang berhasil kamu lakukan manual
+    try:
+        ActionChains(driver).scroll_by_amount(0, distance).perform()
+    except Exception:
+        pass
+
+    # 2. JS Scroll ke Window, Document, dan semua Container Div yang scrollable
+    try:
+        driver.execute_script("""
+            const distance = arguments[0];
+            // Coba scroll window & documentElement
+            window.scrollBy(0, distance);
+            if (document.documentElement) document.documentElement.scrollTop += distance;
+            if (document.body) document.body.scrollTop += distance;
+
+            // Cari semua container yang memiliki scroll (TikTok sering pakai container div tersendiri)
+            const candidates = document.querySelectorAll('div, main, section, [data-e2e*="search"], [data-e2e*="item-list"]');
+            for (const el of candidates) {
+                if (el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 150) {
+                    const s = window.getComputedStyle(el);
+                    if (s.overflowY === 'auto' || s.overflowY === 'scroll' || s.overflow === 'auto' || s.overflow === 'scroll') {
+                        el.scrollTop += distance;
+                        el.dispatchEvent(new Event('scroll', { bubbles: true }));
+                        el.dispatchEvent(new WheelEvent('wheel', { deltaY: distance, bubbles: true }));
+                    }
+                }
+            }
+        """, distance)
+    except Exception:
+        pass
+
+    # 3. Fallback Keyboard (Page Down / Page Up)
+    try:
+        if distance >= 500:
+            ActionChains(driver).send_keys(Keys.PAGE_DOWN).perform()
+        elif distance <= -150:
+            ActionChains(driver).send_keys(Keys.PAGE_UP).perform()
+    except Exception:
+        pass
+
 def login_via_qr(driver):
     """
-    Mengarahkan ke halaman login dan menunggu user scan QR.
+    Mengecek apakah sesi login sudah aktif. Jika belum, membuka halaman login dan menunggu user scan QR.
+    Sesi akan otomatis tersimpan di folder profil browser lokal.
     """
-    print("\n[LOGIN] Mengarahkan ke halaman login TikTok...")
+    print("\n[LOGIN] Memeriksa status sesi login TikTok...")
+    try:
+        driver.get("https://www.tiktok.com")
+        time.sleep(3)
+        ensure_page_loaded(driver, max_wait=6)
+        
+        is_logged_in = driver.execute_script("""
+            return !!(
+                document.querySelector('[data-e2e="profile-icon"]') || 
+                document.querySelector('a[href*="/@"]') ||
+                document.cookie.includes('sessionid')
+            );
+        """)
+        if is_logged_in:
+            print("[LOGIN] Sesi tersimpan ditemukan! Anda sudah dalam keadaan login.")
+            return True
+    except Exception:
+        pass
+
+    print("[LOGIN] Belum login. Mengarahkan ke halaman login TikTok...")
     driver.get("https://www.tiktok.com/login")
+    ensure_page_loaded(driver, max_wait=6)
 
     try:
         try:
-            qr_link = WebDriverWait(driver, 5).until(
+            qr_link = WebDriverWait(driver, 8).until(
                 EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Use QR code')]"))
             )
             qr_link.click()
@@ -82,38 +207,67 @@ def login_via_qr(driver):
             print("[LOGIN] Sepertinya sudah di halaman QR Code.")
 
         print(">>> SILAKAN SCAN QR CODE DI LAYAR SEKARANG <<<")
-        print(">>> Script akan menunggu sampai Anda berhasil login... <<<")
+        print(">>> Script akan menunggu sampai Anda berhasil login (maks 120 detik)... <<<")
 
         WebDriverWait(driver, 120).until(
             lambda d: "login" not in d.current_url
         )
         
-        print("[LOGIN] Login Berhasil terdeteksi!")
+        print("[LOGIN] Login Berhasil terdeteksi! Sesi tersimpan secara otomatis di profil.")
         time.sleep(5)
+        return True
         
     except Exception as e:
         print(f"[ERROR] Gagal login atau waktu habis: {e}")
-        pass
+        return False
 
 def dismiss_guest_popup(driver):
     """
-    Menutup dialog/modal login yang sering muncul saat mode guest (tanpa login).
+    Menghancurkan popup/overlay login secara paksa menggunakan kombinasi ESC,
+    penyembunyian elemen via CSS, dan membuka gembok scroll di body & html.
     """
     try:
+        # 1. Cara Halus: Coba tekan tombol ESC terlebih dahulu
+        try:
+            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+        except Exception:
+            pass
+
+        # 2. Cara JS: Sembunyikan backdrop/modal login & hilangkan overflow hidden
         driver.execute_script("""
+            // Sembunyikan elemen overlay / dialog login
             const selectors = [
+                'div[class*="login-modal"]',
+                'div[class*="DivLoginContainer"]',
+                'div[class*="DivModalContainer"]',
+                'div[role="dialog"]',
+                'div[class*="mask"]',
+                'div[class*="backdrop"]',
                 '[data-e2e="modal-close-inner-button"]',
                 'button[aria-label="Close"]',
-                'div[role="dialog"] button',
                 '.tiktok-modal-close'
             ];
             for (let s of selectors) {
-                const el = document.querySelector(s);
-                if (el && el.offsetParent !== null) {
-                    el.click();
-                    break;
-                }
+                document.querySelectorAll(s).forEach(el => {
+                    try {
+                        el.style.setProperty('display', 'none', 'important');
+                        el.style.setProperty('visibility', 'hidden', 'important');
+                        el.style.setProperty('pointer-events', 'none', 'important');
+                    } catch (e) {}
+                });
             }
+
+            // Buka paksa gembok scroll HANYA jika terkunci hidden (tanpa merusak layout)
+            ['html', 'body'].forEach(tag => {
+                const el = document.querySelector(tag);
+                if (el) {
+                    const style = window.getComputedStyle(el);
+                    if (el.style.overflow === 'hidden' || style.overflowY === 'hidden' || style.overflow === 'hidden') {
+                        el.style.setProperty('overflow', 'auto', 'important');
+                        el.style.setProperty('overflow-y', 'auto', 'important');
+                    }
+                }
+            });
         """)
     except Exception:
         pass
@@ -204,23 +358,29 @@ def load_videos_from_csv(csv_path):
 def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv, max_comments=50):
     """
     Mengambil komentar dari sebuah video TikTok via interceptor XHR/Fetch & fallback DOM.
+    Mendukung scroll kontainer DivCommentMain untuk mengambil seluruh komentar (pagination tak terbatas).
     """
     if not video_url or not video_id:
         return 0
         
     print(f"\n  [KOMENTAR] Mengakses video ID {video_id}: {video_url}")
     driver.get(video_url)
-    time.sleep(5)
+    time.sleep(3)
+    ensure_page_loaded(driver, max_wait=6)
     dismiss_guest_popup(driver)
     
-    # Klik tombol komentar jika sidebar komentar belum terbuka
+    # 1. Pastikan tab/sidebar komentar terbuka
     try:
         driver.execute_script("""
-            let btn = document.querySelector('[data-e2e="comment-icon"]') || 
-                      document.querySelector('[data-e2e="browse-comment-icon"]') ||
-                      document.querySelector('button[aria-label*="comment" i]') ||
-                      document.querySelector('span[data-e2e="comment-icon"]');
-            if (btn) btn.click();
+            let els = document.querySelectorAll('[role="tab"], button, [data-e2e*="comment"], [data-e2e*="tab"]');
+            els.forEach(el => {
+                let txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                let aria = (el.getAttribute('aria-label') || '').toLowerCase();
+                let e2e = (el.getAttribute('data-e2e') || '').toLowerCase();
+                if (txt.includes('comment') || txt.includes('komentar') || e2e.includes('comment') || aria.includes('comment')) {
+                    try { el.click(); } catch(e) {}
+                }
+            });
         """)
     except Exception:
         pass
@@ -229,7 +389,10 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
     seen_comment_ids = set()
     total_captured = 0
     empty_scrolls = 0
-    max_scrolls = 25 if max_comments == 0 else max(5, (max_comments // 5) + 3)
+    api_finished = False
+    
+    # Tentukan batas maksimal scroll (jika 0 = ambil semua komentar sampai habis)
+    max_scrolls = 200 if max_comments == 0 else max(5, (max_comments // 15) + 5)
     
     for scroll_idx in range(max_scrolls):
         dismiss_guest_popup(driver)
@@ -244,6 +407,11 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
                 if 'comment' in url:
                     data = payload.get('data', {})
                     if isinstance(data, dict):
+                        # Cek apakah server menyatakan sudah tidak ada komentar lagi
+                        has_more = data.get('has_more')
+                        if has_more == 0 or has_more is False:
+                            api_finished = True
+
                         raw_comments = data.get('comments') or []
                         for c in raw_comments:
                             if not isinstance(c, dict): continue
@@ -278,59 +446,74 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
                     break
 
         # 2. Fallback DOM jika komentar tidak lewat API
-        if total_captured == 0:
-            dom_comments = driver.execute_script("""
-                let results = [];
-                document.querySelectorAll('[data-e2e="comment-level-1"], [class*="DivCommentItemContainer"]').forEach((el, idx) => {
-                    let userEl = el.querySelector('a[href*="/@"]') || el.querySelector('[data-e2e="comment-username"]') || {};
-                    let textEl = el.querySelector('[data-e2e="comment-level-1-text"]') || el.querySelector('[class*="PCommentText"]') || el;
-                    let user = (userEl.innerText || '').trim();
-                    let user_url = userEl.href || '';
-                    let uname = user_url.includes('/@') ? user_url.split('/@')[1].split('?')[0] : user;
-                    let text = (textEl.innerText || '').trim();
-                    if (text) {
-                        results.push({
-                            cid: 'dom_' + idx,
-                            username: uname || 'Unknown',
-                            nickname: user || 'Unknown',
-                            text: text
-                        });
-                    }
-                });
-                return results;
-            """)
-            if dom_comments:
-                for c in dom_comments:
-                    cid = c['cid']
-                    if cid not in seen_comment_ids:
-                        seen_comment_ids.add(cid)
-                        save_to_csv(comments_csv, [
-                            video_id, keyword, cid, "Unknown", c['username'], c['nickname'], c['text'], 0, 0, video_url
-                        ])
-                        new_in_batch += 1
-                        total_captured += 1
-                        print(f"      + [DOM] @{c['username']}: {c['text'][:35]}...")
-                        if max_comments > 0 and total_captured >= max_comments:
-                            break
+        dom_comments = driver.execute_script("""
+            let results = [];
+            document.querySelectorAll('[data-e2e="comment-level-1"], [class*="DivCommentItemContainer"]').forEach((el, idx) => {
+                let userEl = el.querySelector('a[href*="/@"]') || el.querySelector('[data-e2e="comment-username"]') || {};
+                let textEl = el.querySelector('[data-e2e="comment-level-1-text"]') || el.querySelector('[class*="PCommentText"]') || el;
+                let user = (userEl.innerText || '').trim();
+                let user_url = userEl.href || '';
+                let uname = user_url.includes('/@') ? user_url.split('/@')[1].split('?')[0] : user;
+                let text = (textEl.innerText || '').trim();
+                if (text) {
+                    results.push({
+                        cid: 'dom_' + idx,
+                        username: uname || 'Unknown',
+                        nickname: user || 'Unknown',
+                        text: text
+                    });
+                }
+            });
+            return results;
+        """)
+        if dom_comments:
+            for c in dom_comments:
+                cid = c['cid']
+                if cid not in seen_comment_ids:
+                    seen_comment_ids.add(cid)
+                    save_to_csv(comments_csv, [
+                        video_id, keyword, cid, "Unknown", c['username'], c['nickname'], c['text'], 0, 0, video_url
+                    ])
+                    new_in_batch += 1
+                    total_captured += 1
+                    print(f"      + [DOM] @{c['username']}: {c['text'][:35]}...")
+                    if max_comments > 0 and total_captured >= max_comments:
+                        break
 
+        # Batas tercapai
         if max_comments > 0 and total_captured >= max_comments:
             print(f"    [!] Batas maksimal {max_comments} komentar tercapai.")
             break
 
+        # Selesai jika API sudah tidak punya komentar lagi
+        if api_finished and new_in_batch == 0:
+            print("    [!] Semua komentar untuk video ini telah selesai dimuat (has_more=0).")
+            break
+
         if new_in_batch == 0:
             empty_scrolls += 1
-            if empty_scrolls >= 4:
+            if empty_scrolls >= 5:
+                print("    [!] Selesai (5x scroll tidak menemukan komentar baru).")
                 break
         else:
             empty_scrolls = 0
 
-        # Scroll container komentar
+        # Scroll kontainer DivCommentMain (kontainer scroll resmi komentar TikTok)
+        try:
+            elem = driver.find_element(By.CSS_SELECTOR, '[class*="DivCommentMain"], [class*="CommentMain"], [class*="DivCommentListContainer"], [data-e2e="comment-list"]')
+            ActionChains(driver).move_to_element(elem).scroll_by_amount(0, 1200).perform()
+        except Exception:
+            pass
+
         driver.execute_script("""
-            let containers = document.querySelectorAll('[data-e2e="comment-list"], [class*="DivCommentListContainer"], [class*="CommentListContainer"]');
-            containers.forEach(c => c.scrollBy(0, 1000));
-            window.scrollBy(0, 1000);
+            let targets = document.querySelectorAll('[class*="DivCommentMain"], [class*="CommentMain"], [id*="comment" i], [data-e2e="comment-list"]');
+            targets.forEach(el => {
+                el.scrollTop += 1200;
+                el.dispatchEvent(new Event('scroll', { bubbles: true }));
+                el.dispatchEvent(new WheelEvent('wheel', { deltaY: 1200, bubbles: true }));
+            });
         """)
-        time.sleep(2.5)
+        time.sleep(random.uniform(2.5, 4.0))
 
     print(f"    -> Selesai video {video_id}. Total {total_captured} komentar tersimpan.")
     return total_captured
@@ -424,11 +607,11 @@ def run_scraper():
     print("\n" + "=" * 60)
     print("                   PILIHAN METODE LOGIN")
     print("=" * 60)
-    print("  1. Login via QR Code (Scan QR TikTok di layar)")
+    print("  1. Login Mode (Gunakan Profil/Sesi Tersimpan / Scan QR) [Direkomendasikan]")
     print("  2. Tanpa Login / Guest Mode (Langsung scraping)")
     print("=" * 60)
-    pilihan_login = input("Pilih metode login [1/2] (default: 2): ").strip()
-    mau_login = (pilihan_login == "1")
+    pilihan_login = input("Pilih metode login [1/2] (default: 1): ").strip()
+    mau_login = (pilihan_login != "2")
 
     # Deteksi binary lokal
     chrome_path = find_binary(["chrome.exe"], ["chrome-win64", "chrome", ""])
@@ -437,13 +620,21 @@ def run_scraper():
     print(f"\n[*] Chrome binary       : {chrome_path or 'Default Sistem'}")
     print(f"[*] ChromeDriver binary : {chromedriver_path or 'Default Sistem'}")
 
-    # Setup Chrome Options
+    # Setup Chrome Options & Persistent Profile
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    profile_dir = os.path.join(base_dir, "tiktok_chrome_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+    print(f"[*] Chrome Profile dir  : {profile_dir}")
+
     options = uc.ChromeOptions()
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
     
-    driver_kwargs = {"options": options}
+    driver_kwargs = {
+        "options": options,
+        "user_data_dir": profile_dir
+    }
     if chrome_path:
         driver_kwargs["browser_executable_path"] = chrome_path
     if chromedriver_path:
@@ -475,7 +666,8 @@ def run_scraper():
                 seen_video_ids = set()
                 consecutive_empty_scrolls = 0
                 is_searching = True
-                time.sleep(5)
+                time.sleep(3)
+                ensure_page_loaded(driver, max_wait=8)
                 
                 while is_searching:
                     captured_data = driver.execute_script("var d = window._scraped_data; window._scraped_data = []; return d;")
@@ -561,8 +753,19 @@ def run_scraper():
                             break
 
                     dismiss_guest_popup(driver)
-                    driver.execute_script("window.scrollBy(0, 800);")
-                    time.sleep(3)
+                    ensure_page_loaded(driver, max_wait=2)
+                    
+                    # Human Jitter Multi-Method Scroll (Real Mouse Wheel + JS Container + Keyboard)
+                    scroll_px = random.randint(600, 1000)
+                    perform_human_scroll(driver, scroll_px)
+
+                    # 25% kemungkinan scroll sedikit ke atas (seperti membaca sekilas)
+                    if random.random() < 0.25:
+                        time.sleep(random.uniform(0.7, 1.2))
+                        perform_human_scroll(driver, -random.randint(150, 250))
+
+                    # Delay acak yang lebih natural
+                    time.sleep(random.uniform(3.5, 5.5))
                 
                 print(f"    -> Selesai keyword '{keyword}'. Total video: {len(seen_video_ids)}")
                 time.sleep(2)

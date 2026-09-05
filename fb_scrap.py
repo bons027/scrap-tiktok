@@ -45,12 +45,67 @@ NOTIFICATION_BLACKLIST = [
 
 
 # ==========================================
-# 1. JAVASCRIPT XHR & GRAPHQL NETWORK INTERCEPTOR
+# 1. CDP SCRIPT: STEALTH ANTI-BOT & GRAPHQL INTERCEPTOR
 # ==========================================
-JS_GRAPHQL_INTERCEPTOR = """
+CDP_STEALTH_AND_INTERCEPTOR = """
+// ----------------------------------------------------
+// A. ANTI-BOT & FINGERPRINT EVASION (STEALTH SHIELD)
+// ----------------------------------------------------
+try {
+    // 1. Webdriver Detection Elimination
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    delete navigator.__proto__.webdriver;
+
+    // 2. Mock Chrome Runtime & Internal APIs
+    window.chrome = {
+        runtime: {
+            OnInstalledReason: { INSTALL: 'install', UPDATE: 'update', CHROME_UPDATE: 'chrome_update', SHARED_MODULE_UPDATE: 'shared_module_update' },
+            OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
+            PlatformArch: { ARM: 'arm', ARM64: 'arm64', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
+            PlatformNaclArch: { ARM: 'arm', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
+            PlatformOs: { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' },
+            RequestUpdateCheckStatus: { THROTTLED: 'throttled', NO_UPDATE: 'no_update', UPDATE_AVAILABLE: 'update_available' }
+        },
+        app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } },
+        csi: function() {},
+        loadTimes: function() {}
+    };
+
+    // 3. Realistic Browser Attributes
+    Object.defineProperty(navigator, 'languages', { get: () => ['id-ID', 'id', 'en-US', 'en'] });
+    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+
+    // 4. Permissions API Spoof
+    const origPermissions = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications' ?
+            Promise.resolve({ state: Notification.permission }) :
+            origPermissions(parameters)
+    );
+
+    // 5. Hardware / WebGL GPU Mock
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(parameter) {
+        if (parameter === 37445) return 'Google Inc. (NVIDIA)';
+        if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+        return getParameter.apply(this, [parameter]);
+    };
+    if (typeof WebGL2RenderingContext !== 'undefined') {
+        const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+        WebGL2RenderingContext.prototype.getParameter = function(parameter) {
+            if (parameter === 37445) return 'Google Inc. (NVIDIA)';
+            if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+            return getParameter2.apply(this, [parameter]);
+        };
+    }
+} catch(e) {}
+
+// ----------------------------------------------------
+// B. GRAPHQL & XHR IN-MEMORY NETWORK INTERCEPTOR
+// ----------------------------------------------------
 window._scraped_data = [];
 function pushData(type, payload) {
-    if (window._scraped_data.length > 800) {
+    if (window._scraped_data.length > 1000) {
         window._scraped_data.shift();
     }
     window._scraped_data.push({ type: type, timestamp: Date.now(), payload: payload });
@@ -134,7 +189,10 @@ def is_valid_comment_text(text):
     return True
 
 
-def extract_comments_from_json_tree(obj, results=None):
+def extract_comments_from_json_tree(obj, results=None, parent_author=None, is_reply=False):
+    """
+    Mengekstrak komentar dan deep replies dari struktur pohon GraphQL secara rekursif.
+    """
     if results is None:
         results = []
 
@@ -143,7 +201,7 @@ def extract_comments_from_json_tree(obj, results=None):
             text = str(obj['body'].get('text', '')).strip()
             cid = str(obj.get('id', obj.get('legacy_token', '')))
 
-            # Filter notifikasi ID
+            # Filter notifikasi ID & noise
             if not cid.startswith('bm90aWZpY2F0aW9u') and 'notification' not in cid.lower() and is_valid_comment_text(text) and not text.startswith("http"):
                 author = 'Warga'
                 if 'author' in obj and isinstance(obj['author'], dict):
@@ -159,8 +217,10 @@ def extract_comments_from_json_tree(obj, results=None):
                     except Exception:
                         c_date = str(c_time)
 
+                # Likes & Reaksi
                 likes = 0
                 feedback = obj.get('feedback', {})
+                reply_count = 0
                 if isinstance(feedback, dict):
                     react_cnt = feedback.get('reaction_count', {})
                     if isinstance(react_cnt, dict):
@@ -168,20 +228,47 @@ def extract_comments_from_json_tree(obj, results=None):
                     elif isinstance(feedback.get('feedback_reaction_count'), int):
                         likes = feedback.get('feedback_reaction_count', 0)
 
+                    # Deteksi reply count
+                    if 'replies' in feedback and isinstance(feedback['replies'], dict):
+                        reply_count = feedback['replies'].get('count', 0)
+                    elif 'comment_replies' in feedback and isinstance(feedback['comment_replies'], dict):
+                        reply_count = feedback['comment_replies'].get('count', 0)
+                    elif 'total_comment_count' in feedback:
+                        reply_count = feedback.get('total_comment_count', 0)
+
+                # Cek apakah objek ini adalah balasan (reply)
+                has_parent = 'comment_parent' in obj or is_reply
+                reply_to_target = parent_author or ''
+                if 'comment_parent' in obj and isinstance(obj['comment_parent'], dict):
+                    has_parent = True
+                    p_name = obj['comment_parent'].get('author', {}).get('name')
+                    if p_name:
+                        reply_to_target = p_name
+
                 results.append({
                     'comment_id': cid or f"fb_c_{abs(hash(text))}",
                     'author': author,
                     'comment_date': c_date,
                     'comment_text': text,
-                    'likes': likes
+                    'likes': likes,
+                    'reply_count': reply_count,
+                    'is_reply': 'YA' if has_parent else 'TIDAK',
+                    'reply_to': reply_to_target
                 })
 
-        for v in obj.values():
-            extract_comments_from_json_tree(v, results)
+                # Jika komentar ini memiliki node balasan di dalamnya, traverse dengan menandai is_reply=True
+                if 'feedback' in obj and isinstance(obj['feedback'], dict):
+                    sub_replies = obj['feedback'].get('replies', {})
+                    if isinstance(sub_replies, dict):
+                        extract_comments_from_json_tree(sub_replies, results, parent_author=author, is_reply=True)
+
+        for k, v in obj.items():
+            if k != 'feedback':  # hindari double traversal jika sudah diproses
+                extract_comments_from_json_tree(v, results, parent_author=parent_author, is_reply=is_reply)
 
     elif isinstance(obj, list):
         for item in obj:
-            extract_comments_from_json_tree(item, results)
+            extract_comments_from_json_tree(item, results, parent_author=parent_author, is_reply=is_reply)
 
     return results
 
@@ -215,6 +302,8 @@ def get_driver():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-notifications")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--lang=id-ID,id,en-US,en")
 
     driver_kwargs = {
         "options": options,
@@ -228,7 +317,7 @@ def get_driver():
     driver = uc.Chrome(**driver_kwargs)
 
     try:
-        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": JS_GRAPHQL_INTERCEPTOR})
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": CDP_STEALTH_AND_INTERCEPTOR})
     except Exception:
         pass
 
@@ -284,7 +373,7 @@ def init_comments_csv(filename):
             writer = csv.writer(f)
             writer.writerow([
                 'post_id', 'search_keyword', 'comment_id', 'comment_date',
-                'author_name', 'comment_text', 'likes', 'post_url'
+                'author_name', 'comment_text', 'likes', 'reply_count', 'is_reply', 'reply_to', 'post_url'
             ])
 
 
@@ -295,25 +384,33 @@ def save_to_csv(filename, data_row):
 
 
 def perform_feed_scroll(driver, distance=650):
-    try:
-        ActionChains(driver).scroll_by_amount(0, distance).perform()
-    except Exception:
-        pass
-    try:
-        driver.execute_script("""
-            const dist = arguments[0];
-            window.scrollBy(0, dist);
-            if (document.documentElement) document.documentElement.scrollTop += dist;
-            if (document.body) document.body.scrollTop += dist;
-        """, distance)
-    except Exception:
-        pass
+    """
+    Scroll feed dengan fisika humanized acak untuk mencegah flag anti-bot.
+    """
+    steps = random.randint(3, 6)
+    step_dist = distance / steps
+    for _ in range(steps):
+        try:
+            ActionChains(driver).scroll_by_amount(0, int(step_dist)).perform()
+        except Exception:
+            pass
+        try:
+            driver.execute_script("""
+                const dist = arguments[0];
+                window.scrollBy(0, dist);
+                if (document.documentElement) document.documentElement.scrollTop += dist;
+                if (document.body) document.body.scrollTop += dist;
+            """, step_dist)
+        except Exception:
+            pass
+        time.sleep(random.uniform(0.04, 0.12))
 
 
 def scroll_comment_container_center(driver, distance=550):
     """
     Melakukan scroll roda mouse KHUSUS di bagian tengah dialog komentar,
     memicu lazy loading komentar Facebook tanpa menggeser feed halaman luar.
+    Menggunakan humanized step wheel events.
     """
     try:
         dialog = driver.find_element(By.CSS_SELECTOR, 'div[role="dialog"]')
@@ -342,7 +439,12 @@ def scroll_comment_container_center(driver, distance=550):
 
             if (target) {
                 target.scrollTop += distance;
-                target.dispatchEvent(new WheelEvent('wheel', { deltaY: distance, bubbles: true, clientX: window.innerWidth / 2, clientY: window.innerHeight / 2 }));
+                target.dispatchEvent(new WheelEvent('wheel', { 
+                    deltaY: distance, 
+                    bubbles: true, 
+                    clientX: window.innerWidth / 2 + (Math.random() * 20 - 10), 
+                    clientY: window.innerHeight / 2 + (Math.random() * 20 - 10) 
+                }));
                 target.dispatchEvent(new Event('scroll', { bubbles: true }));
             }
         """, distance)
@@ -409,13 +511,13 @@ def setup_facebook_session():
 
 
 # ==========================================
-# 4. EKSTRAKSI KOMENTAR DARI KONTAINER DIALOG AKTIF
+# 4. EKSTRAKSI KOMENTAR & DEEP REPLIES DARI DIALOG AKTIF
 # ==========================================
 def extract_comments_from_active_container(driver):
     """
-    Mengekstrak komentar dari XHR GraphQL interceptor dan DOM dialog yang aktif.
+    Mengekstrak komentar dan deep replies dari XHR GraphQL interceptor dan DOM dialog yang aktif.
     """
-    # 1. Dari XHR/GraphQL Network
+    # 1. Dari XHR/GraphQL Network (Termasuk child replies yang ter-intercept)
     net_comments = []
     captured_data = driver.execute_script("var d = window._scraped_data; window._scraped_data = []; return d;")
     if captured_data:
@@ -429,7 +531,7 @@ def extract_comments_from_active_container(driver):
                     if c_list:
                         net_comments.extend(c_list)
 
-    # 2. Dari DOM dialog tengah
+    # 2. Dari DOM dialog tengah (Mendeteksi struktur reply berjenjang)
     dom_comments = driver.execute_script("""
         let results = [];
         let scope = document.querySelector('div[role="dialog"]') || document;
@@ -457,11 +559,42 @@ def extract_comments_from_active_container(driver):
             let timeEl = el.querySelector('abbr, a[aria-label*="lalu"], a[aria-label*="ago"], span[id*="timestamp"]');
             let commentDate = timeEl ? (timeEl.getAttribute('aria-label') || timeEl.innerText || 'Terkini') : 'Terkini';
 
+            // Ekstraksi Likes
             let likes = 0;
             let likeEl = el.querySelector('span[aria-label*="reaksi"], span[aria-label*="like"]');
             if (likeEl) {
                 let lTxt = (likeEl.getAttribute('aria-label') || likeEl.innerText || '').replace(/[^0-9]/g, '');
                 if (lTxt) likes = parseInt(lTxt);
+            }
+
+            // Ekstraksi Reply Count pada komentar ini
+            let replyCount = 0;
+            let allSpans = el.querySelectorAll('span, div[role="button"]');
+            for (let s of allSpans) {
+                let st = (s.innerText || '').trim();
+                let match = st.match(/(\\d+)\\s*(?:balasan|repl)/i);
+                if (match && match[1]) {
+                    replyCount = parseInt(match[1]);
+                    break;
+                }
+            }
+
+            // Deteksi apakah komentar ini merupakan balasan (child reply)
+            let isReply = false;
+            let replyTo = '';
+            
+            // Cek apakah bersarang di dalam article/list lain
+            let parentArticle = el.parentElement ? el.parentElement.closest('div[role="article"], ul > li') : null;
+            if (parentArticle && parentArticle !== el) {
+                isReply = true;
+                let pAuth = parentArticle.querySelector('a span[dir="auto"], strong');
+                if (pAuth) replyTo = pAuth.innerText.trim().split('\\n')[0];
+            } else if (el.closest('ul ul') || el.getAttribute('aria-level') === '2' || commentText.startsWith('@')) {
+                isReply = true;
+                if (commentText.startsWith('@')) {
+                    let m = commentText.match(/^@([^\\s,:]+)/);
+                    if (m && m[1]) replyTo = m[1];
+                }
             }
 
             if (commentText && commentText.length > 1 && commentText !== author) {
@@ -470,7 +603,10 @@ def extract_comments_from_active_container(driver):
                     author: author,
                     comment_date: commentDate,
                     comment_text: commentText,
-                    likes: likes
+                    likes: likes,
+                    reply_count: replyCount,
+                    is_reply: isReply ? 'YA' : 'TIDAK',
+                    reply_to: replyTo
                 });
             }
         });
@@ -506,7 +642,7 @@ def switch_filter_to_all_comments(driver):
                 }
             }
         """)
-        time.sleep(1.2)
+        time.sleep(random.uniform(1.1, 1.6))
 
         # Klik menu 'Semua komentar'
         driver.execute_script("""
@@ -519,18 +655,54 @@ def switch_filter_to_all_comments(driver):
                 }
             }
         """)
-        time.sleep(1.5)
+        time.sleep(random.uniform(1.3, 1.8))
     except Exception:
         pass
 
 
+def unfold_all_reply_threads(driver):
+    """
+    Membongkar dan mengklik seluruh tombol 'Lihat balasan' / 'View replies'
+    secara otomatis agar balasan komentar di dalam thread terbuka dan ter-intercept.
+    """
+    try:
+        clicked_count = driver.execute_script("""
+            let scope = document.querySelector('div[role="dialog"]') || document;
+            let buttons = Array.from(scope.querySelectorAll('div[role="button"], span[dir="auto"], a[role="button"], span'));
+            let clickCount = 0;
+
+            for (let b of buttons) {
+                if (b.offsetParent === null) continue; // elemen tidak tampak
+                let txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                let aria = (b.getAttribute('aria-label') || '').toLowerCase();
+
+                let isReplyTrigger = (
+                    /\\b(\\d+\\s*balasan|lihat\\s*(\\d+\\s*)?balasan|balasan\\s*lainnya|\\d+\\s*repl(y|ies)|view\\s*(\\d+\\s*)?repl(y|ies)|view\\s*more\\s*replies|komentar\\s*sebelumnya|previous\\s*comments)\\b/i.test(txt) ||
+                    aria.includes('balasan') || aria.includes('repl')
+                );
+
+                if (isReplyTrigger && !b.getAttribute('data-unfolded')) {
+                    b.setAttribute('data-unfolded', 'true');
+                    try {
+                        b.click();
+                        clickCount++;
+                    } catch(e) {}
+                }
+            }
+            return clickCount;
+        """)
+        return clicked_count or 0
+    except Exception:
+        return 0
+
+
 def exhaustively_scroll_and_extract_comments(driver, max_idle_scrolls=4, max_total_comments_limit=500):
     """
-    LANGKAH 4: Scroll kontainer komentar sampai HABIS dan tidak menampilkan komentar lagi.
-    - Otomatis mengklik tombol 'Lihat komentar lainnya' / 'Lihat balasan'
-    - Melakukan scroll pada kontainer tengah
-    - Mengecek apakah ada komentar baru yang masuk
-    - Jika beberapa kali scroll berturut-turut tidak ada komentar baru dan tombol expand sudah habis -> Selesai.
+    LANGKAH 4: Scroll kontainer komentar sampai HABIS dan membongkar semua deep replies:
+    - Otomatis membuka semua thread balasan (Lihat balasan, Lihat balasan lainnya, View replies)
+    - Melakukan scroll pada kontainer tengah dengan anti-bot wheel jitter
+    - Mengumpulkan komentar utama dan balasan secara komprehensif
+    - Selesai jika tidak ada komentar/balasan baru setelah beberapa putaran.
     """
     seen_in_this_post = set()
     collected_for_post = []
@@ -541,7 +713,12 @@ def exhaustively_scroll_and_extract_comments(driver, max_idle_scrolls=4, max_tot
     while consecutive_no_new < max_idle_scrolls and total_scrolls < max_scroll_limit:
         total_scrolls += 1
 
-        # 1. Klik tombol 'Lihat komentar lainnya' / 'View more comments' / 'Lihat balasan'
+        # 1. Unfold semua thread balasan (deep replies) yang muncul di layar
+        unfolded_replies = unfold_all_reply_threads(driver)
+        if unfolded_replies > 0:
+            time.sleep(random.uniform(1.2, 1.8))
+
+        # 2. Klik tombol 'Lihat komentar lainnya' / 'View more comments' utama
         clicked_expand = driver.execute_script("""
             let scope = document.querySelector('div[role="dialog"]') || document;
             let buttons = scope.querySelectorAll('div[role="button"], span[dir="auto"], a[role="button"], span');
@@ -549,10 +726,10 @@ def exhaustively_scroll_and_extract_comments(driver, max_idle_scrolls=4, max_tot
             for (let b of buttons) {
                 let txt = (b.innerText || b.textContent || '').trim().toLowerCase();
                 if (txt.includes('lihat komentar') || txt.includes('view more comments') || 
-                    txt.includes('lihat balasan') || txt.includes('view replies') ||
-                    txt.includes('balasan lainnya') || txt.includes('komentar sebelumnya') ||
+                    txt.includes('komentar lainnya') || txt.includes('komentar sebelumnya') ||
                     txt.includes('previous comments')) {
-                    if (b.offsetParent !== null) {
+                    if (b.offsetParent !== null && !b.getAttribute('data-main-clicked')) {
+                        b.setAttribute('data-main-clicked', 'true');
                         b.click();
                         wasClicked = true;
                         break;
@@ -562,11 +739,11 @@ def exhaustively_scroll_and_extract_comments(driver, max_idle_scrolls=4, max_tot
             return wasClicked;
         """)
 
-        # 2. Scroll kontainer tengah dialog komentar
-        scroll_comment_container_center(driver, distance=550)
-        time.sleep(random.uniform(1.8, 2.6))
+        # 3. Scroll kontainer tengah dialog komentar dengan humanized jitter
+        scroll_comment_container_center(driver, distance=random.randint(500, 650))
+        time.sleep(random.uniform(1.6, 2.5))
 
-        # 3. Ekstrak komentar yang baru masuk
+        # 4. Ekstrak komentar & balasan yang baru masuk
         extracted = extract_comments_from_active_container(driver)
         new_found_this_step = 0
 
@@ -579,9 +756,18 @@ def exhaustively_scroll_and_extract_comments(driver, max_idle_scrolls=4, max_tot
                 c_author = c.get('author', 'Warga')
                 c_date = c.get('comment_date', 'Terkini')
                 c_likes = c.get('likes', 0)
-                print(f"    + [{c_date}] @{c_author}: \"{c_txt[:55]}...\" (likes: {c_likes})")
+                is_rep = c.get('is_reply', 'TIDAK')
+                rep_to = c.get('reply_to', '')
+                rep_cnt = c.get('reply_count', 0)
 
-        if new_found_this_step > 0 or clicked_expand:
+                if is_rep == 'YA':
+                    target_str = f" [Balasan ke @{rep_to}]" if rep_to else " [Balasan]"
+                    print(f"      └──{target_str} @{c_author}: \"{c_txt[:50]}...\" (likes: {c_likes})")
+                else:
+                    rep_info = f" (balasan: {rep_cnt})" if rep_cnt > 0 else ""
+                    print(f"    + [{c_date}] @{c_author}: \"{c_txt[:55]}...\" (likes: {c_likes}{rep_info})")
+
+        if new_found_this_step > 0 or clicked_expand or unfolded_replies > 0:
             consecutive_no_new = 0
         else:
             consecutive_no_new += 1
@@ -617,7 +803,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
     1. Cari Keyword di Facebook Search.
     2. Ambil postingan berikutnya di feed -> Klik Toggle Komentar.
     3. Ubah filter 'Paling Relevan' menjadi 'Semua Komentar'.
-    4. Scroll kontainer komentar sampai HABIS -> Simpan CSV -> Tutup pop-up -> Lanjut ke postingan berikutnya!
+    4. Scroll kontainer komentar & bongkar balasan sampai HABIS -> Simpan CSV -> Lanjut ke postingan berikutnya!
     """
     processed_signatures = set()
     total_posts_saved = 0
@@ -760,27 +946,28 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
             } catch(e) {}
         """, dom_idx)
 
-        time.sleep(2.5)
+        time.sleep(random.uniform(2.2, 3.0))
 
         # LANGKAH 3: UBAH FILTER MENJADI SEMUA KOMENTAR
         print("  [*] LANGKAH 3: Mengubah Filter Menjadi 'Semua Komentar'...")
         switch_filter_to_all_comments(driver)
 
-        # LANGKAH 4: SCROLL SAMPAI HABIS DAN TIDAK MENAMPILKAN KOMENTAR LAGI
-        print("  [*] LANGKAH 4: Scroll kontainer komentar sampai habis...")
+        # LANGKAH 4: SCROLL SAMPAI HABIS & BONGKAR SEMUA BALASAN KOMENTAR
+        print("  [*] LANGKAH 4: Scroll kontainer komentar & bongkar balasan...")
         post_comments = exhaustively_scroll_and_extract_comments(
             driver, max_idle_scrolls=4, max_total_comments_limit=max_comments_per_post
         )
 
-        # Simpan seluruh komentar postingan ini ke CSV
+        # Simpan seluruh komentar & balasan postingan ini ke CSV
         for c in post_comments:
             save_to_csv(comment_csv, [
                 p_id, keyword, c.get('comment_id'), c.get('comment_date'),
-                c.get('author'), c.get('comment_text'), c.get('likes', 0), p_url
+                c.get('author'), c.get('comment_text'), c.get('likes', 0),
+                c.get('reply_count', 0), c.get('is_reply', 'TIDAK'), c.get('reply_to', ''), p_url
             ])
             total_comments_saved += 1
 
-        print(f"  [+] Selesai Post #{total_posts_saved}. Total {len(post_comments)} komentar berhasil disedot!")
+        print(f"  [+] Selesai Post #{total_posts_saved}. Total {len(post_comments)} komentar & balasan tersimpan!")
 
         # Tutup dialog postingan dan lanjut ke postingan berikutnya
         close_post_dialog(driver)
@@ -801,7 +988,7 @@ def run_live_interactive_sniffer():
     print("Pada mode ini:")
     print("1. Browser Facebook akan terbuka dengan sesi login Anda.")
     print("2. Anda bebas membuka postingan, grup, mencari isu, atau mengklik komentar apa saja.")
-    print("3. Script di background akan OTOMATIS MENYEDOT dan MENYIMPAN seluruh komentar")
+    print("3. Script di background akan OTOMATIS MENYEDOT dan MENYIMPAN seluruh komentar & balasan")
     print("   yang muncul di layar (via XHR/GraphQL & DOM) langsung ke CSV!")
     print("=" * 65)
 
@@ -811,9 +998,9 @@ def run_live_interactive_sniffer():
 
     comment_csv = f"{base_name}.csv"
     init_comments_csv(comment_csv)
-    print(f"[*] Komentar akan otomatis disimpan ke: {comment_csv}")
+    print(f"[*] Komentar & balasan akan otomatis disimpan ke: {comment_csv}")
 
-    print("\n[*] Menjalankan browser dengan Network Interceptor aktif...")
+    print("\n[*] Menjalankan browser dengan Stealth Shield & Network Interceptor aktif...")
     try:
         driver, profile_dir = get_driver()
         driver.get("https://www.facebook.com")
@@ -846,20 +1033,27 @@ def run_live_interactive_sniffer():
                 c_date = c.get('comment_date', 'Terkini')
                 c_id = c.get('comment_id', f"fb_{total_captured}")
                 c_likes = c.get('likes', 0)
+                is_rep = c.get('is_reply', 'TIDAK')
+                rep_to = c.get('reply_to', '')
+                rep_cnt = c.get('reply_count', 0)
                 current_url = driver.current_url
 
                 save_to_csv(comment_csv, [
                     "Live_Monitoring", "Manual_Browse", c_id, c_date,
-                    c_author, c_text, c_likes, current_url
+                    c_author, c_text, c_likes, rep_cnt, is_rep, rep_to, current_url
                 ])
 
-                print(f"[#{total_captured}] @{c_author} ({c_date}): \"{c_text}\" (likes: {c_likes})")
+                if is_rep == 'YA':
+                    target_str = f" [Balasan ke @{rep_to}]" if rep_to else " [Balasan]"
+                    print(f"   └──{target_str} [#{total_captured}] @{c_author}: \"{c_text}\" (likes: {c_likes})")
+                else:
+                    print(f"[#{total_captured}] @{c_author} ({c_date}): \"{c_text}\" (likes: {c_likes})")
 
             time.sleep(1.0)
 
     except KeyboardInterrupt:
         print("\n\n" + "=" * 65)
-        print(f"[SELESAI] Live Monitoring Berakhir. Total {total_captured} komentar tersimpan ke {comment_csv}!")
+        print(f"[SELESAI] Live Monitoring Berakhir. Total {total_captured} komentar & balasan tersimpan ke {comment_csv}!")
         print("=" * 65)
     finally:
         try:

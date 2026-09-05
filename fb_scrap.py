@@ -822,26 +822,27 @@ def close_post_dialog(driver, search_url=None):
     except Exception:
         pass
 
-    # Pastikan browser tidak redirect ke Beranda (facebook.com/)
+    # Pastikan browser tidak redirect ke Beranda Utama (facebook.com/)
     if search_url:
         curr = driver.current_url.rstrip('/')
-        if 'search/posts' not in curr and 'search' not in curr:
-            print("  [*] Menjaga fokus tetap di feed pencarian...")
+        is_on_home = curr in ['https://www.facebook.com', 'https://www.facebook.com/', 'https://web.facebook.com', 'https://m.facebook.com']
+        if is_on_home:
+            print("  [*] Menjaga fokus tetap di feed pencarian grup/isu...")
             try:
                 # Gunakan history back agar posisi scroll tetap terjaga
                 driver.back()
                 time.sleep(1.2)
             except Exception:
                 pass
-            if 'search/posts' not in driver.current_url and 'search' not in driver.current_url:
+            if driver.current_url.rstrip('/') in ['https://www.facebook.com', 'https://www.facebook.com/']:
                 driver.get(search_url)
                 time.sleep(2.5)
 
 
-def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20, max_comments_per_post=150):
+def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20, max_comments_per_post=150, custom_search_url=None, group_name=None):
     """
     Workflow 4 Langkah Berurutan (Post per Post):
-    1. Buka Keyword di Facebook Search Feed.
+    1. Buka Keyword di Facebook Search Feed / Group Search.
     2. Ambil postingan berikutnya di feed -> Klik Toggle Komentar.
     3. Ubah filter 'Paling Relevan' menjadi 'Semua Komentar'.
     4. Scroll kontainer komentar & bongkar balasan sampai HABIS -> Simpan CSV -> Tutup Dialog -> Lanjut Post Berikutnya!
@@ -850,10 +851,11 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
     total_posts_saved = 0
     total_comments_saved = 0
     empty_scrolls = 0
-    search_url = f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(keyword)}"
+    search_url = custom_search_url or f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(keyword)}"
 
+    title_info = f"Grup '{group_name}' | Kata Kunci: '{keyword}'" if group_name else f"Kata Kunci: '{keyword}'"
     print(f"\n" + "=" * 65)
-    print(f"[*] LANGKAH 1: Memproses Pencarian Kata Kunci: '{keyword}'")
+    print(f"[*] LANGKAH 1: Memproses {title_info}")
     print(f"[*] Lokasi Penyimpanan Hasil:")
     print(f"    - Postingan: {post_csv}")
     print(f"    - Komentar : {comment_csv}")
@@ -946,16 +948,18 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
         p_url = next_post.get('post_url')
         dom_idx = next_post.get('dom_index', 0)
 
+        csv_keyword_label = f"[{group_name}] {keyword}" if group_name else keyword
+
         # Simpan metadata postingan
         save_to_csv(post_csv, [
-            keyword, p_id, p_date, p_author, p_text,
+            csv_keyword_label, p_id, p_date, p_author, p_text,
             0, 0, 0, p_url
         ])
 
         print("\n" + "=" * 65)
         print(f"[POST #{total_posts_saved}/{max_posts}] @{p_author} ({p_date})")
         print(f"  \"{p_text[:75]}...\"")
-        print("  [*] LANGKAH 2: Klik Toggle Komentar (Tetap di Halaman Pencarian)...")
+        print("  [*] LANGKAH 2: Klik Toggle Komentar...")
 
         # LANGKAH 2: KLIK TOGGLE KOMENTAR PADA POSTINGAN TERSEBUT SECARA PRESISI
         driver.execute_script("""
@@ -999,7 +1003,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
         # Simpan seluruh komentar & balasan postingan ini ke CSV
         for c in post_comments:
             save_to_csv(comment_csv, [
-                p_id, keyword, c.get('comment_id'), c.get('comment_date'),
+                p_id, csv_keyword_label, c.get('comment_id'), c.get('comment_date'),
                 c.get('author'), c.get('comment_text'), c.get('likes', 0),
                 c.get('reply_count', 0), c.get('is_reply', 'TIDAK'), c.get('reply_to', ''), p_url
             ])
@@ -1122,7 +1126,7 @@ def run_facebook_scraper():
         print("PILIHAN MENU:")
         print("  0. Setup & Simpan Sesi Login Facebook (Cukup Login 1 Kali)")
         print("  1. Pencarian Otomatis Kata Kunci Isu Daerah (4 Langkah Otomatis Penuh)")
-        print("  2. Monitoring Otomatis Grup Facebook Warga (Berdasarkan groups.txt)")
+        print("  2. Monitoring Otomatis Grup Facebook Warga (Buka Grup -> Cari di Dalam Grup)")
         print("  3. Mode Live Interceptor (Bebas Scroll/Klik FB, Script Otomatis Sedot Komentar)")
         print("=" * 65)
         mode = input("Pilih menu [0/1/2/3] (default: 1): ").strip() or "1"
@@ -1192,11 +1196,36 @@ def run_facebook_scraper():
         elif mode == "2":
             for grp in groups:
                 grp_clean = grp.rstrip('/')
+                grp_slug = grp_clean.split('/')[-1]
+
+                # 1. Buka halaman utama grup terlebih dahulu
+                print("\n" + "=" * 65)
+                print(f"[*] MEMBUKA GRUP FACEBOOK: {grp_clean}")
+                print("=" * 65)
+                driver.get(grp_clean)
+                time.sleep(3.5)
+
                 for kw in keywords:
-                    target_url = f"{grp_clean}/?sorting_setting=CHRONOLOGICAL" if kw == "Feed Terbaru" else f"{grp_clean}/search/?q={urllib.parse.quote(kw)}"
-                    driver.get(target_url)
-                    time.sleep(3.5)
-                    process_search_workflow(driver, f"{grp_clean.split('/')[-1]} | {kw}", post_csv, comment_csv, max_posts=max_posts_target, max_comments_per_post=max_comments_limit)
+                    if kw == "Feed Terbaru":
+                        target_url = f"{grp_clean}/?sorting_setting=CHRONOLOGICAL"
+                        print(f"[*] Membuka Feed Kronologis Terbaru di grup '{grp_slug}'...")
+                        driver.get(target_url)
+                        time.sleep(3.5)
+                        process_search_workflow(
+                            driver, "Feed Terbaru", post_csv, comment_csv,
+                            max_posts=max_posts_target, max_comments_per_post=max_comments_limit,
+                            custom_search_url=target_url, group_name=grp_slug
+                        )
+                    else:
+                        target_url = f"{grp_clean}/search/?q={urllib.parse.quote(kw)}"
+                        print(f"[*] Melakukan pencarian '{kw}' di dalam grup '{grp_slug}'...")
+                        driver.get(target_url)
+                        time.sleep(3.5)
+                        process_search_workflow(
+                            driver, kw, post_csv, comment_csv,
+                            max_posts=max_posts_target, max_comments_per_post=max_comments_limit,
+                            custom_search_url=target_url, group_name=grp_slug
+                        )
 
         print("\n" + "=" * 65)
         print("  [SELESAI] Scraping Facebook Berhasil Selesai Penuh!")

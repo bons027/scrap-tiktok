@@ -227,24 +227,40 @@ def setup_tiktok_session():
 
 def login_via_qr(driver):
     """
-    Mengecek apakah sesi login sudah aktif.
-    Jika sudah login, langsung lanjut tanpa membuka halaman login.
-    Jika belum, memberi opsi scan QR atau lanjut Guest Mode.
+    Membuka halaman login TikTok dan menunggu user scan QR / login secara interaktif.
     """
-    print("\n[*] Memeriksa status sesi login TikTok...")
-    try:
-        driver.get("https://www.tiktok.com")
-        time.sleep(2.5)
-        ensure_page_loaded(driver, max_wait=5)
-        
-        if is_user_logged_in(driver):
-            print("[LOGIN] Sesi login tersimpan AKTIF terdeteksi! Melanjutkan pencarian...")
-            return True
-    except Exception:
-        pass
+    print("\n[LOGIN] Membuka halaman login TikTok...")
+    driver.get("https://www.tiktok.com/login")
+    time.sleep(3)
+    ensure_page_loaded(driver, max_wait=6)
 
-    print("[LOGIN] Sesi login belum terdeteksi (Guest Mode aktif). Melanjutkan pencarian...")
-    return True
+    try:
+        try:
+            qr_link = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Use QR code') or contains(text(), 'Gunakan kode QR')]"))
+            )
+            qr_link.click()
+            print("[LOGIN] Tab QR Code diaktifkan di layar browser.")
+        except Exception:
+            pass
+
+        print("\n" + "-" * 65)
+        print(" >>> SILAKAN SCAN QR CODE ATAU LOGIN DI BROWSER SEKARANG <<<")
+        print(" >>> Setelah login berhasil, tekan [ENTER] di terminal.   <<<")
+        print("-" * 65)
+
+        input("Tekan [ENTER] jika Anda sudah selesai login di browser: ")
+
+        if is_user_logged_in(driver):
+            print("[LOGIN] Sesi login terkonfirmasi aktif! Melanjutkan...")
+        else:
+            print("[LOGIN] Melanjutkan proses scraping...")
+        time.sleep(1.5)
+        return True
+
+    except Exception as e:
+        print(f"[LOGIN] Melanjutkan: {e}")
+        return False
 
 def ensure_page_loaded(driver, max_wait=8):
     """
@@ -729,6 +745,18 @@ def run_scraper():
             except ValueError:
                 max_videos_for_comments = 0
 
+    # Pilihan Metode Login Sebelum Browser Dibuka
+    mau_login = False
+    if not args.no_login:
+        print("\n" + "=" * 65)
+        print("                  PILIHAN METODE LOGIN")
+        print("=" * 65)
+        print("  1. Login Mode (Scan QR Code / Login Akun di Browser)")
+        print("  2. Tanpa Login / Guest Mode (Langsung Scraping Cepat)")
+        print("=" * 65)
+        pilihan_login = input("Pilih metode login [1/2] (default: 2): ").strip()
+        mau_login = (pilihan_login == "1")
+
     # Inisialisasi Browser dengan Persistent Profile
     print("\n[*] Menjalankan browser TikTok...")
     try:
@@ -738,11 +766,11 @@ def run_scraper():
         return
 
     try:
-        # Pengecekan Sesi Login
-        if not args.no_login:
+        # Eksekusi Login jika dipilih
+        if mau_login:
             login_via_qr(driver)
         else:
-            print("[*] Mode Guest (Tanpa Login) aktif.")
+            print("[*] Mode Tanpa Login (Guest Mode) dipilih. Melanjutkan langsung...")
 
         # MODE 1 & 2: Scraping Video
         collected_videos = []

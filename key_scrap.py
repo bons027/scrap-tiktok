@@ -412,16 +412,22 @@ def dismiss_guest_popup(driver):
 # ==========================================
 def get_output_csv_paths(base_output_name):
     if not base_output_name:
-        base_output_name = "data_tiktok"
+        base_output_name = "tiktok_isu_daerah"
     if base_output_name.endswith(".csv"):
         base_output_name = base_output_name[:-4]
 
+    # Tambahkan timestamp (tanggal & waktu) otomatis agar file unik dan tidak tertukar
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_with_time = f"{base_output_name}_{timestamp}"
+
     if os.path.isabs(base_output_name) or os.path.dirname(base_output_name):
-        video_csv = f"{base_output_name}.csv"
-        comment_csv = f"{base_output_name}_comments.csv"
+        dir_name = os.path.dirname(base_output_name)
+        base_file = os.path.basename(base_output_name)
+        video_csv = os.path.join(dir_name, f"{base_file}_{timestamp}.csv")
+        comment_csv = os.path.join(dir_name, f"{base_file}_{timestamp}_comments.csv")
     else:
-        video_csv = os.path.join(RESULTS_DIR, f"{base_output_name}.csv")
-        comment_csv = os.path.join(RESULTS_DIR, f"{base_output_name}_comments.csv")
+        video_csv = os.path.join(RESULTS_DIR, f"{base_with_time}.csv")
+        comment_csv = os.path.join(RESULTS_DIR, f"{base_with_time}_comments.csv")
     return video_csv, comment_csv
 
 def load_keywords(filepath="keywords.txt"):

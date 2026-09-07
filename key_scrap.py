@@ -10,7 +10,10 @@ import json
 import csv
 import os
 import random
+import shutil
 import urllib.parse
+import threading
+import queue
 from datetime import datetime
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
@@ -25,6 +28,11 @@ uc.Chrome.__del__ = lambda self: None
 # Folder output default untuk menyimpan seluruh file CSV hasil scraping
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
+
+# Thread-safe Locks & Global Deduplication Tracking
+csv_lock = threading.Lock()
+seen_lock = threading.Lock()
+global_seen_video_ids = set()
 
 # ==========================================
 # 1. JAVASCRIPT INTERCEPTOR (FETCH & XHR)
@@ -72,7 +80,7 @@ window.XMLHttpRequest = new Proxy(OrigXMLHttpRequest, {
 """
 
 # ==========================================
-# 2. FUNGSI DRIVER & PERSISTENT PROFILE
+# 2. FUNGSI DRIVER & ISOLATED WORKER PROFILES
 # ==========================================
 def find_binary(filenames, subdirs):
     """
@@ -90,20 +98,36 @@ def find_binary(filenames, subdirs):
                     return os.path.abspath(candidate)
     return None
 
-def get_driver():
+def get_driver(worker_id=0):
     """
-    Inisialisasi browser undetected-chromedriver dengan profil permanen 'tiktok_chrome_profile'.
-    Sesi login, cookies, dan token akan tersimpan permanen di profil ini.
+    Inisialisasi browser undetected-chromedriver dengan profil terisolasi per worker.
+    Worker 0 menggunakan 'tiktok_chrome_profile'.
+    Worker 1..N menggunakan 'tiktok_chrome_profile_wN' dengan sinkronisasi sesi dari master.
     """
     chrome_path = find_binary(["chrome.exe"], ["chrome-win64", "chrome", ""])
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    profile_dir = os.path.join(base_dir, "tiktok_chrome_profile")
-    os.makedirs(profile_dir, exist_ok=True)
+    master_profile = os.path.join(base_dir, "tiktok_chrome_profile")
+    os.makedirs(master_profile, exist_ok=True)
+
+    if worker_id == 0:
+        profile_dir = master_profile
+    else:
+        profile_dir = os.path.join(base_dir, f"tiktok_chrome_profile_w{worker_id}")
+        # Salin sesi dari profil master ke profil worker jika worker belum punya profil
+        if not os.path.exists(profile_dir) and os.path.exists(master_profile):
+            try:
+                shutil.copytree(
+                    master_profile, profile_dir, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns('*.lock', 'lockfile', 'Singleton*', 'RunningChromeVersion')
+                )
+            except Exception:
+                pass
+        os.makedirs(profile_dir, exist_ok=True)
 
     options = uc.ChromeOptions()
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--window-size=1280,900")
     options.add_argument("--disable-notifications")
 
     driver_kwargs = {
@@ -130,7 +154,6 @@ def is_user_logged_in(driver):
     Mengecek apakah sesi pengguna TikTok sedang aktif (sudah login).
     Mengecek cookies HttpOnly (sessionid, sid_tt, uid_tt) via Selenium dan elemen profil DOM.
     """
-    # 1. Cek cookies resmi TikTok via Selenium (mampu membaca seluruh HttpOnly cookies)
     try:
         cookies = driver.get_cookies()
         session_keys = {'sessionid', 'sessionid_ss', 'sid_tt', 'sid_guard', 'uid_tt', 'uid_tt_ss', 'passport_auth_status'}
@@ -140,7 +163,6 @@ def is_user_logged_in(driver):
     except Exception:
         pass
 
-    # 2. Cek elemen DOM di browser
     try:
         dom_logged = driver.execute_script("""
             const avatar = document.querySelector(
@@ -173,18 +195,17 @@ def setup_tiktok_session():
     print("   - Scan QR Code via Aplikasi TikTok di Smartphone (Paling Cepat)")
     print("   - Atau Login dengan Akun Google / Email / No. Handphone")
     print("2. Setelah berhasil login, sesi dan cookies akan tersimpan otomatis")
-    print("   ke folder 'tiktok_chrome_profile/' dan tidak perlu login lagi!")
+    print("   ke folder 'tiktok_chrome_profile/' dan otomatis terduplikasi ke semua worker!")
     print("=" * 65)
 
     try:
-        driver, profile_dir = get_driver()
+        driver, profile_dir = get_driver(worker_id=0)
         print(f"\n[*] Lokasi Profil Browser: {profile_dir}")
         print("[*] Membuka halaman login TikTok...")
         driver.get("https://www.tiktok.com/login")
         time.sleep(3)
         ensure_page_loaded(driver, max_wait=6)
 
-        # Coba alihkan ke tab QR code jika tersedia
         try:
             qr_link = WebDriverWait(driver, 5).until(
                 EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Use QR code') or contains(text(), 'Gunakan kode QR')]"))
@@ -201,7 +222,7 @@ def setup_tiktok_session():
         print("-" * 65)
 
         start_wait = time.time()
-        max_login_wait = 180  # 3 menit
+        max_login_wait = 180
 
         while time.time() - start_wait < max_login_wait:
             if is_user_logged_in(driver):
@@ -215,7 +236,7 @@ def setup_tiktok_session():
         if not is_user_logged_in(driver):
             input("\n[?] Jika Anda sudah selesai login di browser, tekan [ENTER] di sini: ")
 
-        print("\n[SELESAI] Setup sesi selesai. Anda sekarang siap menjalankan scraping TikTok!")
+        print("\n[SELESAI] Setup sesi selesai. Anda sekarang siap menjalankan scraping multi-browser!")
 
     except Exception as e:
         print(f"[ERROR] Terjadi kesalahan saat setup sesi: {e}")
@@ -294,7 +315,6 @@ def ensure_page_loaded(driver, max_wait=8):
             last_status = status
 
             if status == 'CLICKED_RETRY':
-                print("    [*] Terdeteksi tombol 'Try again' / 'Coba lagi'. Berhasil diklik otomatis!")
                 time.sleep(3)
                 return True
             elif status == 'OK':
@@ -304,7 +324,6 @@ def ensure_page_loaded(driver, max_wait=8):
         time.sleep(1.5)
 
     if last_status == 'HAS_ERROR':
-        print("    [!] Halaman masih menampilkan error. Melakukan refresh otomatis...")
         try:
             driver.refresh()
             time.sleep(4)
@@ -399,7 +418,7 @@ def dismiss_guest_popup(driver):
         pass
 
 # ==========================================
-# 4. FUNGSI CSV & OUTPUT PATHS
+# 4. FUNGSI CSV & OUTPUT PATHS (THREAD-SAFE)
 # ==========================================
 def get_output_csv_paths(base_output_name):
     if not base_output_name:
@@ -407,7 +426,7 @@ def get_output_csv_paths(base_output_name):
     if base_output_name.endswith(".csv"):
         base_output_name = base_output_name[:-4]
 
-    # Tambahkan timestamp (tanggal & waktu) otomatis agar file unik dan tidak tertukar
+    # Sisipkan timestamp (tanggal & waktu) otomatis agar unik
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_with_time = f"{base_output_name}_{timestamp}"
 
@@ -442,25 +461,30 @@ def load_keywords(filepath="keywords.txt"):
     return keywords
 
 def init_csv(filename):
-    if not os.path.isfile(filename):
-        with open(filename, mode='w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(['search_keyword', 'video_id', 'upload_date', 'username', 'description', 'play_count', 'digg_count', 'comment_count', 'video_url'])
+    with csv_lock:
+        if not os.path.isfile(filename):
+            with open(filename, mode='w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['search_keyword', 'video_id', 'upload_date', 'username', 'description', 'play_count', 'digg_count', 'comment_count', 'video_url'])
 
 def init_comments_csv(filename):
-    if not os.path.isfile(filename):
-        with open(filename, mode='w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(['video_id', 'search_keyword', 'comment_id', 'comment_date', 'username', 'nickname', 'comment_text', 'likes', 'reply_count', 'video_url'])
+    with csv_lock:
+        if not os.path.isfile(filename):
+            with open(filename, mode='w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['video_id', 'search_keyword', 'comment_id', 'comment_date', 'username', 'nickname', 'comment_text', 'likes', 'reply_count', 'video_url'])
 
 def save_to_csv(filename, data_row):
-    with open(filename, mode='a', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(data_row)
+    """
+    Fungsi penyimpanan CSV aman dari bentrok multi-threading (Thread-Safe Lock).
+    """
+    with csv_lock:
+        with open(filename, mode='a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(data_row)
 
 def load_videos_from_csv(csv_path):
     if not os.path.exists(csv_path):
-        # Coba cari di folder results/ jika tidak ada di root
         cand = os.path.join(RESULTS_DIR, csv_path)
         if os.path.exists(cand):
             csv_path = cand
@@ -469,13 +493,16 @@ def load_videos_from_csv(csv_path):
             return []
 
     videos = []
+    seen_ids = set()
     with open(csv_path, mode='r', encoding='utf-8', errors='replace') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            vid_id = row.get('video_id', '').strip()
+            vid_id = str(row.get('video_id', '')).strip()
             vid_url = row.get('video_url', '').strip()
             kw = row.get('search_keyword', 'Unknown').strip()
-            if vid_id and vid_url and vid_id.lower() != 'none':
+            # Hindari duplikasi ID video saat memuat CSV
+            if vid_id and vid_url and vid_id.lower() != 'none' and vid_id not in seen_ids:
+                seen_ids.add(vid_id)
                 videos.append({
                     'video_id': vid_id,
                     'video_url': vid_url,
@@ -488,17 +515,18 @@ def load_videos_from_csv(csv_path):
 # ==========================================
 # 5. FUNGSI SCRAPING KOMENTAR PER VIDEO
 # ==========================================
-def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv, max_comments=50):
+def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv, max_comments=50, worker_prefix=""):
     if not video_url or not video_id:
         return 0
         
-    print(f"\n  [KOMENTAR] Mengakses video ID {video_id}: {video_url}")
+    w_tag = f"[{worker_prefix}] " if worker_prefix else ""
+    print(f"\n  {w_tag}Mengakses Video ID {video_id}: {video_url}")
     driver.get(video_url)
-    time.sleep(3)
+    time.sleep(2.5)
     ensure_page_loaded(driver, max_wait=6)
     dismiss_guest_popup(driver)
     
-    # 1. Pastikan tab/sidebar komentar terbuka
+    # Pastikan tab komentar aktif
     try:
         driver.execute_script("""
             let els = document.querySelectorAll('[role="tab"], button, [data-e2e*="comment"], [data-e2e*="tab"]');
@@ -513,7 +541,7 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
         """)
     except Exception:
         pass
-    time.sleep(2)
+    time.sleep(1.8)
     
     seen_comment_ids = set()
     total_captured = 0
@@ -526,7 +554,7 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
         dismiss_guest_popup(driver)
         new_in_batch = 0
         
-        # 1. Ambil dari API interceptor
+        # 1. Interceptor API
         captured_data = driver.execute_script("var d = window._scraped_data; window._scraped_data = []; return d;")
         if captured_data:
             for item in captured_data:
@@ -564,7 +592,7 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
                             ])
                             new_in_batch += 1
                             total_captured += 1
-                            print(f"      + [{cdate}] @{uname}: {txt[:40]}... (likes: {likes})")
+                            print(f"    {w_tag}+ [{cdate}] @{uname}: {txt[:40]}... (likes: {likes})")
                             
                             if max_comments > 0 and total_captured >= max_comments:
                                 break
@@ -572,7 +600,7 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
                 if max_comments > 0 and total_captured >= max_comments:
                     break
 
-        # 2. Fallback DOM jika komentar tidak lewat API
+        # 2. Fallback DOM
         dom_comments = driver.execute_script("""
             let results = [];
             document.querySelectorAll('[data-e2e="comment-level-1"], [class*="DivCommentItemContainer"]').forEach((el, idx) => {
@@ -603,22 +631,19 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
                     ])
                     new_in_batch += 1
                     total_captured += 1
-                    print(f"      + [DOM] @{c['username']}: {c['text'][:40]}...")
+                    print(f"    {w_tag}+ [DOM] @{c['username']}: {c['text'][:40]}...")
                     if max_comments > 0 and total_captured >= max_comments:
                         break
 
         if max_comments > 0 and total_captured >= max_comments:
-            print(f"    [!] Batas maksimal {max_comments} komentar tercapai.")
             break
 
         if api_finished and new_in_batch == 0:
-            print("    [!] Semua komentar untuk video ini telah selesai dimuat (has_more=0).")
             break
 
         if new_in_batch == 0:
             empty_scrolls += 1
             if empty_scrolls >= 5:
-                print("    [!] Selesai (5x scroll tidak menemukan komentar baru).")
                 break
         else:
             empty_scrolls = 0
@@ -638,18 +663,68 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
                 el.dispatchEvent(new WheelEvent('wheel', { deltaY: 1200, bubbles: true }));
             });
         """)
-        time.sleep(random.uniform(2.2, 3.5))
+        time.sleep(random.uniform(2.0, 3.2))
 
-    print(f"    -> Selesai video {video_id}. Total {total_captured} komentar tersimpan.")
+    print(f"  {w_tag}-> Selesai video {video_id}. Total {total_captured} komentar tersimpan.")
     return total_captured
 
 # ==========================================
-# 6. MENU UTAMA & LOGIKA SCRAPER
+# 6. WORKER FUNCTION UNTUK MULTI-BROWSER
+# ==========================================
+def comment_scraping_worker(worker_id, video_queue, comments_csv, max_comments, total_videos, counter_lock, progress_dict):
+    """
+    Worker thread yang menjalankan 1 browser terisolasi untuk menyedot komentar dari antrean video.
+    Menjamin tidak ada video yang diambil 2 kali karena diambil secara atomic dari queue.
+    """
+    worker_tag = f"Worker #{worker_id+1}"
+    print(f"[*] [{worker_tag}] Membuka browser...")
+    try:
+        driver, _ = get_driver(worker_id=worker_id)
+        driver.get("https://www.tiktok.com")
+        time.sleep(2)
+    except Exception as e:
+        print(f"[ERROR] [{worker_tag}] Gagal membuka browser: {e}")
+        return
+
+    try:
+        while True:
+            try:
+                v_data = video_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            with counter_lock:
+                progress_dict['done'] += 1
+                curr_idx = progress_dict['done']
+
+            print(f"\n[{worker_tag}] ({curr_idx}/{total_videos}) Memproses Video: {v_data.get('description', '')[:45]}...")
+            scrape_comments_for_video(
+                driver=driver,
+                video_url=v_data['video_url'],
+                video_id=v_data['video_id'],
+                keyword=v_data.get('keyword', 'Unknown'),
+                comments_csv=comments_csv,
+                max_comments=max_comments,
+                worker_prefix=worker_tag
+            )
+            video_queue.task_done()
+            time.sleep(random.uniform(1.2, 2.2))
+
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        print(f"[*] [{worker_tag}] Selesai dan browser ditutup.")
+
+# ==========================================
+# 7. MENU UTAMA & LOGIKA SCRAPER
 # ==========================================
 def run_scraper():
     import argparse
-    parser = argparse.ArgumentParser(description="TikTok Intelligence Scraper (Video & Komentar)")
+    parser = argparse.ArgumentParser(description="TikTok Intelligence Scraper Multi-Browser (Video & Komentar)")
     parser.add_argument("--mode", type=str, choices=["0", "1", "2", "3"], help="Mode scraper (0=Setup Sesi, 1=Video Saja, 2=Video+Komen, 3=Komen dari CSV)")
+    parser.add_argument("--workers", type=int, help="Jumlah browser paralel (1-4)")
     parser.add_argument("--output", type=str, help="Nama dasar file output CSV")
     parser.add_argument("--keyword", type=str, help="Kata kunci tunggal pencarian")
     parser.add_argument("--max-comments", type=int, help="Maksimal komentar per video")
@@ -660,12 +735,12 @@ def run_scraper():
     mode = args.mode
     if not mode:
         print("=" * 65)
-        print("       TIKTOK INTELLIGENCE SCRAPER (LOCAL SELENIUM)")
+        print("   TIKTOK MULTI-BROWSER INTELLIGENCE SCRAPER (LOCAL SELENIUM)")
         print("=" * 65)
         print("PILIHAN MENU:")
         print("  0. Setup & Simpan Sesi Login TikTok (Cukup Login 1 Kali)")
         print("  1. Scrap Video Metadata Saja (Berdasarkan keywords.txt)")
-        print("  2. Scrap Video + Komentar Sekaligus (Otomatis & Lengkap)")
+        print("  2. Scrap Video + Komentar Sekaligus (Multi-Browser Cepat & Otomatis)")
         print("  3. Scrap Komentar dari File CSV Video yang Sudah Ada")
         print("=" * 65)
         mode = input("Pilih menu [0/1/2/3] (default: 2): ").strip() or "2"
@@ -680,6 +755,7 @@ def run_scraper():
     base_output_name = args.output or ""
     max_comments_per_video = args.max_comments or 50
     max_videos_for_comments = args.max_videos or 0
+    num_workers = args.workers or 1
 
     if mode in ["1", "2"]:
         if args.keyword:
@@ -711,10 +787,10 @@ def run_scraper():
                     
             if not args.max_videos:
                 try:
-                    max_vid_input = input("Maksimal video yang diambil komentarnya [0 untuk semua video] (default: 0): ").strip()
-                    max_videos_for_comments = int(max_vid_input) if max_vid_input else 0
+                    max_vid_input = input("Maksimal video yang dicari per keyword [0 untuk semua] (default: 30): ").strip()
+                    max_videos_for_comments = int(max_vid_input) if max_vid_input else 30
                 except ValueError:
-                    max_videos_for_comments = 0
+                    max_videos_for_comments = 30
 
     elif mode == "3":
         csv_source = input("Masukkan nama file CSV sumber video (default: data_tiktok.csv): ").strip() or "data_tiktok.csv"
@@ -722,7 +798,7 @@ def run_scraper():
         if not existing_videos:
             return
             
-        print(f"[*] Berhasil memuat {len(existing_videos)} video dari {csv_source}")
+        print(f"[*] Berhasil memuat {len(existing_videos)} video unik dari {csv_source}")
         prefix = os.path.splitext(os.path.basename(csv_source))[0]
         if not base_output_name:
             base_output_name = input(f"Nama file output komentar (default: {prefix}_comments): ").strip() or f"{prefix}_comments"
@@ -745,34 +821,51 @@ def run_scraper():
             except ValueError:
                 max_videos_for_comments = 0
 
+    # Pilihan Jumlah Browser Paralel
+    if mode in ["2", "3"] and not args.workers:
+        print("\n" + "=" * 65)
+        print("          AKSELERASI MULTI-BROWSER (CONCURRENCY)")
+        print("=" * 65)
+        print("  1. 1 Browser (Standar)")
+        print("  2. 2 Browser Sekaligus (2x Lebih Cepat)")
+        print("  3. 3 Browser Sekaligus (3x Lebih Cepat - Direkomendasikan)")
+        print("  4. 4 Browser Sekaligus (4x Super Cepat)")
+        print("=" * 65)
+        try:
+            w_in = input("Pilih jumlah browser paralel [1/2/3/4] (default: 3): ").strip()
+            num_workers = int(w_in) if w_in in ["1", "2", "3", "4"] else 3
+        except ValueError:
+            num_workers = 3
+
     # Pilihan Metode Login Sebelum Browser Dibuka
     mau_login = False
     if not args.no_login:
         print("\n" + "=" * 65)
         print("                  PILIHAN METODE LOGIN")
         print("=" * 65)
-        print("  1. Login Mode (Scan QR Code / Login Akun di Browser)")
+        print("  1. Login Mode (Scan QR Code / Login Akun di Browser Utama)")
         print("  2. Tanpa Login / Guest Mode (Langsung Scraping Cepat)")
         print("=" * 65)
         pilihan_login = input("Pilih metode login [1/2] (default: 2): ").strip()
         mau_login = (pilihan_login == "1")
 
-    # Inisialisasi Browser dengan Persistent Profile
-    print("\n[*] Menjalankan browser TikTok...")
+    # Inisialisasi Browser Master untuk Pencarian Video
+    print(f"\n[*] Menjalankan browser master TikTok (Total Worker: {num_workers})...")
     try:
-        driver, profile_dir = get_driver()
+        driver_master, profile_dir = get_driver(worker_id=0)
     except Exception as e:
         print(f"[ERROR] Gagal membuka browser: {e}")
         return
 
     try:
-        # Eksekusi Login jika dipilih
         if mau_login:
-            login_via_qr(driver)
+            login_via_qr(driver_master)
         else:
             print("[*] Mode Tanpa Login (Guest Mode) dipilih. Melanjutkan langsung...")
 
-        # MODE 1 & 2: Scraping Video
+        # -------------------------------------------------------------
+        # TAHAP 1: PENCARIAN & DEDUP VIDEO LENGKAP
+        # -------------------------------------------------------------
         collected_videos = []
         if mode in ["1", "2"]:
             for index, keyword in enumerate(keywords):
@@ -780,21 +873,20 @@ def run_scraper():
                 safe_keyword = urllib.parse.quote(keyword)
                 target_url = f"https://www.tiktok.com/search?q={safe_keyword}"
                 
-                driver.get(target_url)
-                seen_video_ids = set()
+                driver_master.get(target_url)
                 consecutive_empty_scrolls = 0
                 max_empty_limit = 10
                 is_searching = True
                 time.sleep(3)
-                ensure_page_loaded(driver, max_wait=8)
+                ensure_page_loaded(driver_master, max_wait=8)
                 
                 scroll_count = 0
                 while is_searching:
                     scroll_count += 1
                     data_found_in_batch = False
 
-                    # 1. Ekstrak dari Network Interceptor (API TikTok)
-                    captured_data = driver.execute_script("var d = window._scraped_data; window._scraped_data = []; return d;")
+                    # 1. Ekstrak dari Interceptor API
+                    captured_data = driver_master.execute_script("var d = window._scraped_data; window._scraped_data = []; return d;")
                     if captured_data:
                         for item in captured_data:
                             tipe = item.get('type')
@@ -815,11 +907,15 @@ def run_scraper():
                                         if not isinstance(vid_obj, dict): continue
 
                                         vid_id = str(vid_obj.get('id', ''))
-                                        if not vid_id or vid_id in seen_video_ids: continue
-                                        
-                                        seen_video_ids.add(vid_id)
+                                        if not vid_id: continue
+
+                                        # DEDUKPLIKASI KETAT: Cek apakah ID video sudah pernah ditemukan
+                                        with seen_lock:
+                                            if vid_id in global_seen_video_ids:
+                                                continue
+                                            global_seen_video_ids.add(vid_id)
+
                                         data_found_in_batch = True
-                                        
                                         author_nickname = vid_obj.get('author', {}).get('nickname', 'Unknown')
                                         author_unique_id = vid_obj.get('author', {}).get('uniqueId', 'Unknown')
                                         desc = vid_obj.get('desc', '')
@@ -847,11 +943,11 @@ def run_scraper():
                                             'description': desc
                                         })
                                         
-                                        print(f"    + [#{len(seen_video_ids)}] [{upload_date}] {desc[:35]}... ({stats.get('commentCount', 0)} komentar)")
+                                        print(f"    + [#{len(global_seen_video_ids)}] [{upload_date}] {desc[:35]}... ({stats.get('commentCount', 0)} komentar)")
 
-                    # 2. Ekstrak Fallback dari DOM HTML (Semua Kartu Video di Layar)
+                    # 2. Ekstrak Fallback dari DOM HTML
                     try:
-                        dom_vids = driver.execute_script("""
+                        dom_vids = driver_master.execute_script("""
                             let results = [];
                             let cards = document.querySelectorAll(
                                 'div[data-e2e="search_top-item"], div[data-e2e="search_video-item"], div[class*="DivItemContainer"], [data-e2e="search-card-container"], div[class*="DivVideoCardContainer"]'
@@ -875,33 +971,37 @@ def run_scraper():
                         if dom_vids:
                             for dv in dom_vids:
                                 d_id = str(dv.get('id', ''))
-                                if d_id and d_id not in seen_video_ids:
-                                    seen_video_ids.add(d_id)
-                                    data_found_in_batch = True
-                                    d_url = dv.get('url', '')
-                                    d_author = dv.get('author', 'Unknown')
-                                    d_desc = dv.get('desc', '')
-                                    
-                                    save_to_csv(video_csv, [
-                                        keyword, d_id, "Terkini", d_author, d_desc, 0, 0, 0, d_url
-                                    ])
-                                    collected_videos.append({
-                                        'video_id': d_id,
-                                        'video_url': d_url,
-                                        'keyword': keyword,
-                                        'username': d_author,
-                                        'description': d_desc
-                                    })
-                                    print(f"    + [#{len(seen_video_ids)}] [DOM] {d_desc[:35]}... (@{d_author})")
+                                if not d_id: continue
+
+                                # DEDUKPLIKASI KETAT
+                                with seen_lock:
+                                    if d_id in global_seen_video_ids:
+                                        continue
+                                    global_seen_video_ids.add(d_id)
+
+                                data_found_in_batch = True
+                                d_url = dv.get('url', '')
+                                d_author = dv.get('author', 'Unknown')
+                                d_desc = dv.get('desc', '')
+                                
+                                save_to_csv(video_csv, [
+                                    keyword, d_id, "Terkini", d_author, d_desc, 0, 0, 0, d_url
+                                ])
+                                collected_videos.append({
+                                    'video_id': d_id,
+                                    'video_url': d_url,
+                                    'keyword': keyword,
+                                    'username': d_author,
+                                    'description': d_desc
+                                })
+                                print(f"    + [#{len(global_seen_video_ids)}] [DOM] {d_desc[:35]}... (@{d_author})")
                     except Exception:
                         pass
 
-                    # 3. Cek apakah target jumlah video sudah tercapai
-                    if max_videos_for_comments > 0 and len(seen_video_ids) >= max_videos_for_comments:
+                    if max_videos_for_comments > 0 and len(global_seen_video_ids) >= max_videos_for_comments:
                         print(f"    [*] Target batas {max_videos_for_comments} video tercapai.")
                         break
 
-                    # 4. Tracking Empty Scrolls
                     if data_found_in_batch:
                         consecutive_empty_scrolls = 0
                     else:
@@ -910,80 +1010,103 @@ def run_scraper():
                             print(f"    [*] Selesai ({max_empty_limit}x scroll berturut-turut tanpa video baru).")
                             break
 
-                    # 5. Dismiss Popups & Handle Errors
-                    dismiss_guest_popup(driver)
-                    ensure_page_loaded(driver, max_wait=1.5)
+                    dismiss_guest_popup(driver_master)
+                    ensure_page_loaded(driver_master, max_wait=1.5)
                     
-                    # 6. Deep Scrolling Action (Kombinasi Wheel, JS Scroll & ScrollToBottom)
                     scroll_px = random.randint(1200, 1800)
-                    perform_human_scroll(driver, scroll_px)
+                    perform_human_scroll(driver_master, scroll_px)
 
-                    # Setiap 2x scroll, pancing IntersectionObserver dengan trigger bawah
                     if scroll_count % 2 == 0:
                         try:
-                            driver.execute_script("window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });")
+                            driver_master.execute_script("window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });")
                         except Exception:
                             pass
 
-                    # 20% kemungkinan scroll sedikit ke atas untuk natural reading behavior
-                    if random.random() < 0.20:
-                        time.sleep(random.uniform(0.5, 0.9))
-                        perform_human_scroll(driver, -random.randint(200, 350))
-
                     time.sleep(random.uniform(2.5, 3.8))
                 
-                print(f"    -> Selesai keyword '{keyword}'. Total ditemukan: {len(seen_video_ids)} video.")
-                time.sleep(2)
+                print(f"    -> Selesai keyword '{keyword}'. Total ditemukan: {len(global_seen_video_ids)} video unik.")
+                time.sleep(1.5)
 
-        # Target video untuk komentar
-        target_videos_for_comments = []
-        if mode == "2":
-            target_videos_for_comments = collected_videos
-        elif mode == "3":
-            target_videos_for_comments = existing_videos
-
-        if target_videos_for_comments and comment_csv:
-            if max_videos_for_comments > 0:
-                target_videos_for_comments = target_videos_for_comments[:max_videos_for_comments]
-
-            print("\n" + "=" * 65)
-            print(f"  MULAI SCRAPING KOMENTAR UNTUK {len(target_videos_for_comments)} VIDEO")
-            print("=" * 65)
-
-            total_all_comments = 0
-            for v_idx, v_data in enumerate(target_videos_for_comments):
-                print(f"\n--- [{v_idx+1}/{len(target_videos_for_comments)}] Memproses Komentar Video ---")
-                print(f"Judul/Deskripsi : {v_data.get('description', '')[:50]}...")
-                v_count = scrape_comments_for_video(
-                    driver=driver,
-                    video_url=v_data['video_url'],
-                    video_id=v_data['video_id'],
-                    keyword=v_data.get('keyword', 'Unknown'),
-                    comments_csv=comment_csv,
-                    max_comments=max_comments_per_video
-                )
-                total_all_comments += v_count
-                time.sleep(2)
-
-            print("\n" + "=" * 65)
-            print(f" [SELESAI] Total {total_all_comments} komentar berhasil disimpan ke {comment_csv}")
-            print("=" * 65)
-
-    except KeyboardInterrupt:
-        print("\n[!] Dihentikan User.")
     finally:
+        # Tutup browser master pencarian sebelum meluncurkan worker komentar
         try:
-            driver.quit()
+            driver_master.quit()
         except Exception:
             pass
-        print(f"\n" + "=" * 65)
-        print("  [SELESAI] Hasil Scraping:")
-        if video_csv and os.path.exists(video_csv):
-            print(f"  * File Video    : {video_csv}")
-        if comment_csv and os.path.exists(comment_csv):
-            print(f"  * File Komentar : {comment_csv}")
-        print("  * Analisis Sentimen & Topik: Jalankan 'python app.py'")
+
+    # -------------------------------------------------------------
+    # TAHAP 2: SCRAPING KOMENTAR MULTI-BROWSER (DEDUP TERJAMIN)
+    # -------------------------------------------------------------
+    target_videos_for_comments = []
+    if mode == "2":
+        target_videos_for_comments = collected_videos
+    elif mode == "3":
+        target_videos_for_comments = existing_videos
+
+    if target_videos_for_comments and comment_csv:
+        # 1. Deduplikasi total daftar video sebelum dimasukkan ke antrean
+        unique_targets = []
+        seen_queue_ids = set()
+        for v in target_videos_for_comments:
+            v_id = str(v.get('video_id', '')).strip()
+            if v_id and v_id not in seen_queue_ids:
+                seen_queue_ids.add(v_id)
+                unique_targets.append(v)
+
+        if max_videos_for_comments > 0:
+            unique_targets = unique_targets[:max_videos_for_comments]
+
+        total_unique_videos = len(unique_targets)
+
+        print("\n" + "=" * 65)
+        print(f"   MULAI SCRAPING KOMENTAR DENGAN {num_workers} BROWSER PARALEL")
+        print(f"   * Total Video Unik : {total_unique_videos} video (Nol Duplikasi)")
+        print(f"   * File Output CSV  : {comment_csv}")
         print("=" * 65)
 
+        # 2. Isi Queue Antrean Tugas
+        video_queue = queue.Queue()
+        for v in unique_targets:
+            video_queue.put(v)
+
+        # 3. Jalankan Worker Threads
+        counter_lock = threading.Lock()
+        progress_dict = {'done': 0}
+        threads = []
+
+        actual_workers = min(num_workers, total_unique_videos) if total_unique_videos > 0 else 1
+
+        for w_idx in range(actual_workers):
+            t = threading.Thread(
+                target=comment_scraping_worker,
+                args=(w_idx, video_queue, comment_csv, max_comments_per_video, total_unique_videos, counter_lock, progress_dict),
+                daemon=True
+            )
+            threads.append(t)
+            t.start()
+            # Stagger startup browser 2.5 detik untuk menjaga stabilitas RAM & CPU
+            time.sleep(2.5)
+
+        # Tunggu semua antrean video selesai
+        video_queue.join()
+        for t in threads:
+            t.join()
+
+        print("\n" + "=" * 65)
+        print(f" [SELESAI] Seluruh komentar berhasil disimpan ke: {comment_csv}")
+        print("=" * 65)
+
+    print(f"\n" + "=" * 65)
+    print("  [SELESAI PENUH] Scraping TikTok Berhasil Tuntas!")
+    if video_csv and os.path.exists(video_csv):
+        print(f"  * File Video Unik : {video_csv}")
+    if comment_csv and os.path.exists(comment_csv):
+        print(f"  * File Komentar   : {comment_csv}")
+    print("  * Analisis Sentimen & Topik: Jalankan 'python app.py'")
+    print("=" * 65)
+
 if __name__ == "__main__":
-    run_scraper()
+    try:
+        run_scraper()
+    except KeyboardInterrupt:
+        print("\n[!] Dihentikan oleh pengguna. Seluruh data yang sudah terambil aman di CSV.")

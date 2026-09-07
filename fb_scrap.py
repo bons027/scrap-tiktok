@@ -962,6 +962,18 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
     5. Scroll kontainer komentar & bongkar balasan sampai HABIS -> Simpan CSV -> Tutup Dialog / Kembali ke Search -> Lanjut Post Berikutnya!
     """
     processed_signatures = set()
+    if os.path.exists(post_csv):
+        try:
+            with open(post_csv, mode='r', encoding='utf-8', errors='replace') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    auth = row.get('author_name', '')
+                    txt = (row.get('post_text', '') or '')[:45]
+                    if auth or txt:
+                        processed_signatures.add(f"{auth}:::{txt}")
+        except Exception:
+            pass
+
     total_posts_saved = 0
     total_comments_saved = 0
     empty_scrolls = 0
@@ -970,6 +982,8 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
     title_info = f"Grup '{group_name}' | Kata Kunci: '{keyword}'" if group_name else f"Kata Kunci: '{keyword}'"
     print(f"\n" + "=" * 65)
     print(f"[*] LANGKAH 1: Memproses {title_info}")
+    if processed_signatures:
+        print(f"[*] [RESUME AKTIF] Sesi sebelumnya terdeteksi: {len(processed_signatures)} postingan sudah pernah disimpan.")
     print(f"[*] Lokasi Penyimpanan Hasil:")
     print(f"    - Postingan: {post_csv}")
     print(f"    - Komentar : {comment_csv}")

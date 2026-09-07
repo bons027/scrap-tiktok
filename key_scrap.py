@@ -14,6 +14,7 @@ import shutil
 import urllib.parse
 import threading
 import queue
+import glob
 from datetime import datetime
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
@@ -512,6 +513,26 @@ def load_videos_from_csv(csv_path):
                 })
     return videos
 
+def get_already_scraped_video_ids(comments_csv_path):
+    """
+    Membaca seluruh video_id yang sudah pernah berhasil di-scrape di file comments_csv.
+    Digunakan untuk auto-resume jika proses scraping sempat terhenti di tengah jalan.
+    """
+    if not comments_csv_path or not os.path.exists(comments_csv_path):
+        return set()
+    
+    scraped_ids = set()
+    try:
+        with open(comments_csv_path, mode='r', encoding='utf-8', errors='replace') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                v_id = str(row.get('video_id', '')).strip()
+                if v_id and v_id.lower() != 'none' and v_id != 'video_id':
+                    scraped_ids.add(v_id)
+    except Exception:
+        pass
+    return scraped_ids
+
 # ==========================================
 # 5. FUNGSI SCRAPING KOMENTAR PER VIDEO
 # ==========================================
@@ -793,17 +814,39 @@ def run_scraper():
                     max_videos_for_comments = 30
 
     elif mode == "3":
-        csv_source = input("Masukkan nama file CSV sumber video (default: data_tiktok.csv): ").strip() or "data_tiktok.csv"
+        # Temukan file-file CSV video yang ada di results/ atau root
+        found_csvs = [
+            os.path.basename(f) for f in glob.glob(os.path.join(RESULTS_DIR, "*.csv")) + glob.glob("*.csv")
+            if not f.endswith("_comments.csv") and not f.endswith("_posts.csv")
+        ]
+        default_csv = found_csvs[0] if found_csvs else "data_tiktok.csv"
+
+        if found_csvs:
+            print(f"\n[*] File CSV video terdeteksi: {', '.join(found_csvs[:5])}")
+
+        csv_source = input(f"Masukkan nama file CSV sumber video (default: {default_csv}): ").strip() or default_csv
         existing_videos = load_videos_from_csv(csv_source)
         if not existing_videos:
             return
             
         print(f"[*] Berhasil memuat {len(existing_videos)} video unik dari {csv_source}")
         prefix = os.path.splitext(os.path.basename(csv_source))[0]
+        default_comment_name = f"{prefix}_comments.csv"
+
         if not base_output_name:
-            base_output_name = input(f"Nama file output komentar (default: {prefix}_comments): ").strip() or f"{prefix}_comments"
+            base_output_name = input(f"Nama file output komentar (default: {default_comment_name}): ").strip() or default_comment_name
         
-        video_csv, comment_csv = get_output_csv_paths(base_output_name)
+        # Jika file sudah berupa file CSV komentar, gunakan path langsung
+        if base_output_name.endswith(".csv"):
+            if os.path.isabs(base_output_name) or os.path.dirname(base_output_name):
+                comment_csv = base_output_name
+            else:
+                cand = os.path.join(RESULTS_DIR, base_output_name)
+                comment_csv = cand if os.path.exists(cand) or os.path.exists(RESULTS_DIR) else base_output_name
+            video_csv = ""
+        else:
+            video_csv, comment_csv = get_output_csv_paths(base_output_name)
+
         init_comments_csv(comment_csv)
         print(f"[*] Komentar akan disimpan ke: {comment_csv}")
         
@@ -1044,7 +1087,7 @@ def run_scraper():
         target_videos_for_comments = existing_videos
 
     if target_videos_for_comments and comment_csv:
-        # 1. Deduplikasi total daftar video sebelum dimasukkan ke antrean
+        # 1. Deduplikasi total daftar video
         unique_targets = []
         seen_queue_ids = set()
         for v in target_videos_for_comments:
@@ -1056,45 +1099,64 @@ def run_scraper():
         if max_videos_for_comments > 0:
             unique_targets = unique_targets[:max_videos_for_comments]
 
-        total_unique_videos = len(unique_targets)
+        total_target_videos = len(unique_targets)
 
-        print("\n" + "=" * 65)
-        print(f"   MULAI SCRAPING KOMENTAR DENGAN {num_workers} BROWSER PARALEL")
-        print(f"   * Total Video Unik : {total_unique_videos} video (Nol Duplikasi)")
-        print(f"   * File Output CSV  : {comment_csv}")
-        print("=" * 65)
+        # 2. AUTO-RESUME CHECKPOINT: Cek video mana saja yang sudah pernah di-scrape ke comment_csv
+        already_scraped_ids = get_already_scraped_video_ids(comment_csv)
+        pending_targets = [v for v in unique_targets if str(v.get('video_id', '')).strip() not in already_scraped_ids]
+        already_done_count = total_target_videos - len(pending_targets)
 
-        # 2. Isi Queue Antrean Tugas
-        video_queue = queue.Queue()
-        for v in unique_targets:
-            video_queue.put(v)
+        if already_done_count > 0:
+            print("\n" + "=" * 65)
+            print("  [RESUME CHECKPOINT AKTIF] Melanjutkan Sesi Scraping")
+            print("=" * 65)
+            print(f"  * Total Video Target       : {total_target_videos} video")
+            print(f"  * Sudah Selesai Di-scrape  : {already_done_count} video")
+            print(f"  * Sisa yang Akan Diproses  : {len(pending_targets)} video (Lanjut dari Video #{already_done_count + 1})")
+            print(f"  * Browser Paralel          : {num_workers} browser")
+            print(f"  * File Output Komentar     : {comment_csv}")
+            print("=" * 65)
+        else:
+            print("\n" + "=" * 65)
+            print(f"   MULAI SCRAPING KOMENTAR DENGAN {num_workers} BROWSER PARALEL")
+            print(f"   * Total Video Target : {total_target_videos} video (Nol Duplikasi)")
+            print(f"   * File Output CSV    : {comment_csv}")
+            print("=" * 65)
 
-        # 3. Jalankan Worker Threads
-        counter_lock = threading.Lock()
-        progress_dict = {'done': 0}
-        threads = []
+        if not pending_targets:
+            print(f"\n[INFO] Seluruh {total_target_videos} video sudah selesai di-scrape komentarnya ke '{comment_csv}'.")
+        else:
+            # 3. Isi Queue hanya dengan video yang BELUM di-scrape
+            video_queue = queue.Queue()
+            for v in pending_targets:
+                video_queue.put(v)
 
-        actual_workers = min(num_workers, total_unique_videos) if total_unique_videos > 0 else 1
+            # 4. Jalankan Worker Threads dengan counter akurat
+            counter_lock = threading.Lock()
+            progress_dict = {'done': already_done_count}
+            threads = []
 
-        for w_idx in range(actual_workers):
-            t = threading.Thread(
-                target=comment_scraping_worker,
-                args=(w_idx, video_queue, comment_csv, max_comments_per_video, total_unique_videos, counter_lock, progress_dict),
-                daemon=True
-            )
-            threads.append(t)
-            t.start()
-            # Stagger startup browser 2.5 detik untuk menjaga stabilitas RAM & CPU
-            time.sleep(2.5)
+            actual_workers = min(num_workers, len(pending_targets)) if len(pending_targets) > 0 else 1
 
-        # Tunggu semua antrean video selesai
-        video_queue.join()
-        for t in threads:
-            t.join()
+            for w_idx in range(actual_workers):
+                t = threading.Thread(
+                    target=comment_scraping_worker,
+                    args=(w_idx, video_queue, comment_csv, max_comments_per_video, total_target_videos, counter_lock, progress_dict),
+                    daemon=True
+                )
+                threads.append(t)
+                t.start()
+                # Stagger startup browser 2.5 detik untuk menjaga stabilitas RAM & CPU
+                time.sleep(2.5)
 
-        print("\n" + "=" * 65)
-        print(f" [SELESAI] Seluruh komentar berhasil disimpan ke: {comment_csv}")
-        print("=" * 65)
+            # Tunggu semua antrean video selesai
+            video_queue.join()
+            for t in threads:
+                t.join()
+
+            print("\n" + "=" * 65)
+            print(f" [SELESAI] Seluruh komentar ({total_target_videos} video) tersimpan di: {comment_csv}")
+            print("=" * 65)
 
     print(f"\n" + "=" * 65)
     print("  [SELESAI PENUH] Scraping TikTok Berhasil Tuntas!")

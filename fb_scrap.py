@@ -844,69 +844,106 @@ def close_post_dialog(driver, search_url=None):
                 time.sleep(2.5)
 
 
-def apply_recent_posts_filter(driver):
+def apply_recent_posts_filter(driver, retries=3):
     """
-    Mengaktifkan filter 'Postingan terbaru' / 'Recent posts' pada feed pencarian Facebook atau grup.
-    Mendukung tombol toggle, radio button, dan sidebar filter Facebook.
+    Mengaktifkan filter 'Terbaru' / 'Postingan terbaru' pada feed pencarian Facebook atau grup.
+    Mendukung elemen switch presisi:
+    <input role="switch" type="checkbox" aria-label="Terbaru" ...>
     """
-    try:
-        clicked = driver.execute_script("""
-            // 1. Cari elemen switch / radio / button dengan teks 'Postingan terbaru' atau 'Recent posts'
-            let elements = Array.from(document.querySelectorAll(
-                'div[role="switch"], div[role="radio"], input[type="checkbox"], input[type="radio"], div[role="button"], span[dir="auto"], div[aria-label], label'
-            ));
+    for attempt in range(retries):
+        try:
+            res = driver.execute_script("""
+                // 1. Selector Presisi Sesuai DOM Facebook: <input role="switch" type="checkbox" aria-label="Terbaru">
+                const exactInputs = Array.from(document.querySelectorAll(
+                    'input[aria-label="Terbaru"], input[aria-label*="Terbaru" i], input[aria-label*="Recent" i], input[role="switch"]'
+                ));
 
-            for (let el of elements) {
-                let txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                let aria = (el.getAttribute('aria-label') || '').toLowerCase();
-
-                let isRecent = (
-                    txt === 'postingan terbaru' || 
-                    txt === 'recent posts' || 
-                    txt.includes('postingan terbaru') || 
-                    txt.includes('recent posts') || 
-                    aria.includes('postingan terbaru') || 
-                    aria.includes('recent posts') ||
-                    txt === 'terbaru' ||
-                    txt === 'terkini'
-                );
-
-                if (isRecent) {
-                    let isChecked = el.getAttribute('aria-checked') === 'true' || el.checked === true;
-                    if (!isChecked) {
-                        let clickTarget = el.closest('div[role="switch"], div[role="radio"], label, div[role="button"]') || el;
+                for (let inp of exactInputs) {
+                    let aria = (inp.getAttribute('aria-label') || '').toLowerCase();
+                    if (aria.includes('terbaru') || aria.includes('recent')) {
+                        let isChecked = inp.getAttribute('aria-checked') === 'true' || inp.checked === true;
+                        if (isChecked) {
+                            return { status: 'already_active', label: inp.getAttribute('aria-label') };
+                        }
+                        
+                        // Scroll ke elemen dan lakukan klik
+                        inp.scrollIntoView({ behavior: 'instant', block: 'center' });
+                        let clickTarget = inp.closest('label') || inp.closest('div[role="switch"]') || inp.closest('div[role="button"]') || inp;
+                        
                         try {
                             clickTarget.click();
-                            return true;
-                        } catch(e) {}
-                    } else {
-                        return true; // sudah aktif
-                    }
-                }
-            }
+                        } catch(e) {
+                            try { inp.click(); } catch(e2) {}
+                        }
 
-            // 2. Cari di sidebar filter kiri (Filter Pencarian)
-            let sidebars = Array.from(document.querySelectorAll('div[aria-label*="Filter"], div[role="complementary"], div[role="navigation"]'));
-            for (let sb of sidebars) {
-                let items = sb.querySelectorAll('div[role="button"], div[role="radio"], span, label');
-                for (let it of items) {
-                    let st = (it.innerText || it.textContent || '').trim().toLowerCase();
-                    if (st === 'postingan terbaru' || st === 'recent posts' || st.includes('postingan terbaru')) {
+                        // Dispatch synthetic events untuk memastikan React menangkap perubahan state
                         try {
-                            it.click();
-                            return true;
+                            inp.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                            inp.dispatchEvent(new Event('change', { bubbles: true }));
+                        } catch(e3) {}
+
+                        return { status: 'clicked', label: inp.getAttribute('aria-label') };
+                    }
+                }
+
+                // 2. Fallback: Cari elemen switch / radio / container dengan teks atau aria-label 'Terbaru'
+                const candidateNodes = Array.from(document.querySelectorAll(
+                    'div[role="switch"], div[role="radio"], label, div[role="button"], span[dir="auto"]'
+                ));
+
+                for (let el of candidateNodes) {
+                    let txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    let aria = (el.getAttribute('aria-label') || '').toLowerCase();
+
+                    let isRecentMatch = (
+                        txt === 'terbaru' ||
+                        txt === 'postingan terbaru' ||
+                        txt === 'recent posts' ||
+                        aria === 'terbaru' ||
+                        aria.includes('postingan terbaru') ||
+                        aria.includes('recent posts')
+                    );
+
+                    if (isRecentMatch) {
+                        let isChecked = el.getAttribute('aria-checked') === 'true' || el.checked === true;
+                        let childInput = el.querySelector('input');
+                        if (childInput && (childInput.getAttribute('aria-checked') === 'true' || childInput.checked === true)) {
+                            isChecked = true;
+                        }
+
+                        if (isChecked) {
+                            return { status: 'already_active', label: txt || aria };
+                        }
+
+                        let target = el.closest('label, div[role="switch"], div[role="button"]') || el;
+                        try {
+                            target.click();
+                            return { status: 'clicked', label: txt || aria };
                         } catch(e) {}
                     }
                 }
-            }
-            return false;
-        """)
-        if clicked:
-            print("  [*] Filter 'Postingan Terbaru' berhasil diaktifkan!")
-            time.sleep(2.5)
-        return clicked
-    except Exception:
-        return False
+
+                return { status: 'not_found' };
+            """)
+
+            if res and isinstance(res, dict):
+                status = res.get('status')
+                label = res.get('label', 'Terbaru')
+                if status == 'already_active':
+                    print(f"  [*] Filter '{label}' sudah dalam keadaan AKTIF.")
+                    return True
+                elif status == 'clicked':
+                    print(f"  [*] Filter '{label}' berhasil di-KLIK (diaktifkan)!")
+                    time.sleep(2.5)  # Tunggu feed Facebook me-refresh postingan terbaru
+                    return True
+
+        except Exception as e:
+            pass
+
+        if attempt < retries - 1:
+            time.sleep(1.2)
+
+    return False
 
 
 def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20, max_comments_per_post=150, custom_search_url=None, group_name=None):
@@ -1195,6 +1232,7 @@ def run_facebook_scraper():
     import argparse
     parser = argparse.ArgumentParser(description="Facebook Regional Intelligence Scraper (Humas Bupati)")
     parser.add_argument("--mode", type=str, choices=["0", "1", "2", "3"], help="Mode scraper (0=Setup, 1=Keywords, 2=Groups, 3=Live)")
+    parser.add_argument("--group", type=str, help="URL grup Facebook target")
     parser.add_argument("--output", type=str, help="Nama prefix file output")
     parser.add_argument("--keyword", type=str, help="Kata kunci tunggal pencarian")
     parser.add_argument("--max-posts", type=int, help="Maksimal postingan per kata kunci")
@@ -1243,15 +1281,22 @@ def run_facebook_scraper():
                 max_posts_target = 20
 
     elif mode == "2":
-        groups = load_groups("groups.txt")
-        if not groups:
-            g_input = input("URL Grup FB (contoh: https://www.facebook.com/groups/namagrup): ").strip()
-            if g_input: groups = [g_input]
-            else: return
+        if args.group:
+            groups = [args.group]
+        else:
+            groups = load_groups("groups.txt")
+            if not groups:
+                g_input = input("URL Grup FB (contoh: https://www.facebook.com/groups/namagrup): ").strip()
+                if g_input: groups = [g_input]
+                else: return
 
-        print("Pilihan Metode Grup:\n  A. Kata Kunci di keywords.txt\n  B. Feed Terbaru")
-        m_grp = input("Pilih [A/B] (default: A): ").strip().upper() or "A"
-        keywords = [args.keyword] if args.keyword else (load_keywords("keywords.txt") if m_grp == "A" else ["Feed Terbaru"])
+        if args.keyword:
+            keywords = [args.keyword]
+        else:
+            print("Pilihan Metode Grup:\n  A. Kata Kunci di keywords.txt\n  B. Feed Terbaru")
+            m_grp = input("Pilih [A/B] (default: A): ").strip().upper() or "A"
+            keywords = load_keywords("keywords.txt") if m_grp == "A" else ["Feed Terbaru"]
+        
         if not base_output_name:
             base_output_name = input("Nama file output (default: fb_grup_monitoring): ").strip() or "fb_grup_monitoring"
 

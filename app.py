@@ -35,6 +35,19 @@ analysis_state = {
     "error": ""
 }
 
+def find_csv_path(filename):
+    if not filename:
+        return None
+    if os.path.isabs(filename) and os.path.exists(filename):
+        return filename
+    results_path = os.path.join(BASE_DIR, "results", filename)
+    if os.path.exists(results_path):
+        return results_path
+    base_path = os.path.join(BASE_DIR, filename)
+    if os.path.exists(base_path):
+        return base_path
+    return results_path if os.path.exists(results_path) else base_path
+
 def normalize_sentiment(val):
     if not val or pd.isna(val):
         return "Netral"

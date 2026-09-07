@@ -783,14 +783,18 @@ def run_scraper():
                 driver.get(target_url)
                 seen_video_ids = set()
                 consecutive_empty_scrolls = 0
+                max_empty_limit = 10
                 is_searching = True
                 time.sleep(3)
                 ensure_page_loaded(driver, max_wait=8)
                 
+                scroll_count = 0
                 while is_searching:
-                    captured_data = driver.execute_script("var d = window._scraped_data; window._scraped_data = []; return d;")
+                    scroll_count += 1
                     data_found_in_batch = False
 
+                    # 1. Ekstrak dari Network Interceptor (API TikTok)
+                    captured_data = driver.execute_script("var d = window._scraped_data; window._scraped_data = []; return d;")
                     if captured_data:
                         for item in captured_data:
                             tipe = item.get('type')
@@ -798,16 +802,9 @@ def run_scraper():
                             
                             if tipe in ['INTERCEPTED_FETCH', 'INTERCEPTED_XHR']:
                                 data_asli = payload.get('data', {})
-                                
-                                if isinstance(data_asli, dict):
-                                    has_more = data_asli.get('has_more')
-                                    if has_more == 0 or has_more is False:
-                                        print("    [!] API: Data video pencarian habis (has_more=0).")
-                                        is_searching = False
-                                        
                                 videos = []
                                 if isinstance(data_asli, dict):
-                                    if 'itemList' in data_asli:
+                                    if 'itemList' in data_asli and isinstance(data_asli['itemList'], list):
                                         videos = data_asli['itemList']
                                     elif 'data' in data_asli and isinstance(data_asli['data'], list):
                                         videos = data_asli['data']
@@ -850,39 +847,92 @@ def run_scraper():
                                             'description': desc
                                         })
                                         
-                                        print(f"    + [{upload_date}] {desc[:35]}... ({stats.get('commentCount', 0)} komentar)")
+                                        print(f"    + [#{len(seen_video_ids)}] [{upload_date}] {desc[:35]}... ({stats.get('commentCount', 0)} komentar)")
 
-                    if not is_searching:
+                    # 2. Ekstrak Fallback dari DOM HTML (Semua Kartu Video di Layar)
+                    try:
+                        dom_vids = driver.execute_script("""
+                            let results = [];
+                            let cards = document.querySelectorAll(
+                                'div[data-e2e="search_top-item"], div[data-e2e="search_video-item"], div[class*="DivItemContainer"], [data-e2e="search-card-container"], div[class*="DivVideoCardContainer"]'
+                            );
+                            for (let c of cards) {
+                                let link = c.querySelector('a[href*="/video/"]');
+                                if (link && link.href) {
+                                    let href = link.href;
+                                    let vid_id = href.includes('/video/') ? href.split('/video/')[1].split('?')[0].split('/')[0] : '';
+                                    let authorEl = c.querySelector('a[href*="/@"], [data-e2e="search-card-user-unique-id"], [data-e2e="search-card-user-link"]');
+                                    let author = authorEl ? (authorEl.innerText || '').trim() : 'Unknown';
+                                    let descEl = c.querySelector('[data-e2e="search-card-video-caption"], [class*="DivVideoDesc"], [class*="PVideoDesc"]');
+                                    let desc = descEl ? (descEl.innerText || '').trim() : '';
+                                    if (vid_id) {
+                                        results.push({ id: vid_id, url: href, author: author, desc: desc });
+                                    }
+                                }
+                            }
+                            return results;
+                        """)
+                        if dom_vids:
+                            for dv in dom_vids:
+                                d_id = str(dv.get('id', ''))
+                                if d_id and d_id not in seen_video_ids:
+                                    seen_video_ids.add(d_id)
+                                    data_found_in_batch = True
+                                    d_url = dv.get('url', '')
+                                    d_author = dv.get('author', 'Unknown')
+                                    d_desc = dv.get('desc', '')
+                                    
+                                    save_to_csv(video_csv, [
+                                        keyword, d_id, "Terkini", d_author, d_desc, 0, 0, 0, d_url
+                                    ])
+                                    collected_videos.append({
+                                        'video_id': d_id,
+                                        'video_url': d_url,
+                                        'keyword': keyword,
+                                        'username': d_author,
+                                        'description': d_desc
+                                    })
+                                    print(f"    + [#{len(seen_video_ids)}] [DOM] {d_desc[:35]}... (@{d_author})")
+                    except Exception:
+                        pass
+
+                    # 3. Cek apakah target jumlah video sudah tercapai
+                    if max_videos_for_comments > 0 and len(seen_video_ids) >= max_videos_for_comments:
+                        print(f"    [*] Target batas {max_videos_for_comments} video tercapai.")
                         break
 
-                    page_text = driver.execute_script("return document.body.innerText")
-                    if "Tidak ada hasil lainnya" in page_text or "No more results" in page_text:
-                        print("    [!] Visual: Text 'Tidak ada hasil' ditemukan.")
-                        is_searching = False
-                        break
-                    
+                    # 4. Tracking Empty Scrolls
                     if data_found_in_batch:
                         consecutive_empty_scrolls = 0
                     else:
                         consecutive_empty_scrolls += 1
-                        if consecutive_empty_scrolls >= 5:
-                            print("    [!] Timeout: 5x Scroll kosong.")
-                            is_searching = False
+                        if consecutive_empty_scrolls >= max_empty_limit:
+                            print(f"    [*] Selesai ({max_empty_limit}x scroll berturut-turut tanpa video baru).")
                             break
 
+                    # 5. Dismiss Popups & Handle Errors
                     dismiss_guest_popup(driver)
-                    ensure_page_loaded(driver, max_wait=2)
+                    ensure_page_loaded(driver, max_wait=1.5)
                     
-                    scroll_px = random.randint(600, 1000)
+                    # 6. Deep Scrolling Action (Kombinasi Wheel, JS Scroll & ScrollToBottom)
+                    scroll_px = random.randint(1200, 1800)
                     perform_human_scroll(driver, scroll_px)
 
-                    if random.random() < 0.25:
-                        time.sleep(random.uniform(0.7, 1.2))
-                        perform_human_scroll(driver, -random.randint(150, 250))
+                    # Setiap 2x scroll, pancing IntersectionObserver dengan trigger bawah
+                    if scroll_count % 2 == 0:
+                        try:
+                            driver.execute_script("window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });")
+                        except Exception:
+                            pass
 
-                    time.sleep(random.uniform(3.0, 4.8))
+                    # 20% kemungkinan scroll sedikit ke atas untuk natural reading behavior
+                    if random.random() < 0.20:
+                        time.sleep(random.uniform(0.5, 0.9))
+                        perform_human_scroll(driver, -random.randint(200, 350))
+
+                    time.sleep(random.uniform(2.5, 3.8))
                 
-                print(f"    -> Selesai keyword '{keyword}'. Total video: {len(seen_video_ids)}")
+                print(f"    -> Selesai keyword '{keyword}'. Total ditemukan: {len(seen_video_ids)} video.")
                 time.sleep(2)
 
         # Target video untuk komentar

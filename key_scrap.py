@@ -128,34 +128,37 @@ def get_driver():
 def is_user_logged_in(driver):
     """
     Mengecek apakah sesi pengguna TikTok sedang aktif (sudah login).
-    Mengecek elemen ikon profil avatar, username, cookie sessionid, atau link profil.
+    Mengecek cookies HttpOnly (sessionid, sid_tt, uid_tt) via Selenium dan elemen profil DOM.
     """
+    # 1. Cek cookies resmi TikTok via Selenium (mampu membaca seluruh HttpOnly cookies)
     try:
-        return driver.execute_script("""
-            // 1. Cek elemen profil avatar / navigasi profil
-            const profileEl = document.querySelector(
+        cookies = driver.get_cookies()
+        session_keys = {'sessionid', 'sessionid_ss', 'sid_tt', 'sid_guard', 'uid_tt', 'uid_tt_ss', 'passport_auth_status'}
+        for c in cookies:
+            if c.get('name') in session_keys and c.get('value'):
+                return True
+    except Exception:
+        pass
+
+    # 2. Cek elemen DOM di browser
+    try:
+        dom_logged = driver.execute_script("""
+            const avatar = document.querySelector(
                 '[data-e2e="profile-icon"], [data-e2e="nav-profile"], [class*="AvatarContainer"], a[href*="/@"] img, img[class*="ImgAvatar"]'
             );
-            if (profileEl && profileEl.offsetParent !== null) return true;
+            if (avatar && avatar.offsetParent !== null) return true;
 
-            // 2. Cek apakah ada cookie sessionid
-            if (document.cookie.includes('sessionid') || document.cookie.includes('sid_tt') || document.cookie.includes('uid_tt')) {
-                return true;
-            }
-
-            // 3. Cek tombol Login di navigasi atas. Jika ada tombol Login besar, berarti belum login
-            const loginBtn = document.querySelector('[data-e2e="top-login-button"], button[class*="ButtonLogin"]');
-            if (loginBtn && loginBtn.offsetParent !== null) {
-                return false;
-            }
-
-            // 4. Cek URL
-            if (window.location.href.includes('/login')) return false;
+            const profileLink = document.querySelector('a[href*="/@"]');
+            if (profileLink && profileLink.href && !profileLink.href.includes('/@login')) return true;
 
             return false;
         """)
+        if dom_logged:
+            return True
     except Exception:
-        return False
+        pass
+
+    return False
 
 def setup_tiktok_session():
     """
@@ -194,7 +197,7 @@ def setup_tiktok_session():
         print("\n" + "-" * 65)
         print(" >>> SILAKAN SELESAIKAN LOGIN DI JENDELA BROWSER TIKTOK <<<")
         print(" >>> Script memantau status login secara otomatis...     <<<")
-        print(" >>> Atau ketik 'ok' / tekan Enter jika sudah login.     <<<")
+        print(" >>> Atau tekan [ENTER] di terminal jika sudah login.   <<<")
         print("-" * 65)
 
         start_wait = time.time()
@@ -210,9 +213,9 @@ def setup_tiktok_session():
             time.sleep(2)
 
         if not is_user_logged_in(driver):
-            input("\n[?] Jika Anda sudah selesai login di browser, tekan [ENTER] di sini untuk menyimpan: ")
+            input("\n[?] Jika Anda sudah selesai login di browser, tekan [ENTER] di sini: ")
 
-        print("\n[SELESAI] Setup sesi selesai. Anda sekarang siap menjalankan scraping TikTok tanpa popup login!")
+        print("\n[SELESAI] Setup sesi selesai. Anda sekarang siap menjalankan scraping TikTok!")
 
     except Exception as e:
         print(f"[ERROR] Terjadi kesalahan saat setup sesi: {e}")
@@ -224,52 +227,24 @@ def setup_tiktok_session():
 
 def login_via_qr(driver):
     """
-    Mengecek apakah sesi login sudah aktif. Jika belum, membuka halaman login dan menunggu user scan QR/login.
-    Sesi akan otomatis tersimpan di folder profil browser lokal.
+    Mengecek apakah sesi login sudah aktif.
+    Jika sudah login, langsung lanjut tanpa membuka halaman login.
+    Jika belum, memberi opsi scan QR atau lanjut Guest Mode.
     """
-    print("\n[LOGIN] Memeriksa status sesi login TikTok...")
+    print("\n[*] Memeriksa status sesi login TikTok...")
     try:
         driver.get("https://www.tiktok.com")
-        time.sleep(3)
-        ensure_page_loaded(driver, max_wait=6)
+        time.sleep(2.5)
+        ensure_page_loaded(driver, max_wait=5)
         
         if is_user_logged_in(driver):
-            print("[LOGIN] Sesi tersimpan ditemukan! Anda sudah dalam keadaan login.")
+            print("[LOGIN] Sesi login tersimpan AKTIF terdeteksi! Melanjutkan pencarian...")
             return True
     except Exception:
         pass
 
-    print("[LOGIN] Belum login. Mengarahkan ke halaman login TikTok...")
-    driver.get("https://www.tiktok.com/login")
-    ensure_page_loaded(driver, max_wait=6)
-
-    try:
-        try:
-            qr_link = WebDriverWait(driver, 8).until(
-                EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Use QR code') or contains(text(), 'Gunakan kode QR')]"))
-            )
-            qr_link.click()
-            print("[LOGIN] Mode QR Code diaktifkan.")
-        except Exception:
-            print("[LOGIN] Silakan login via QR code atau metode login lainnya di layar.")
-
-        print(">>> SILAKAN SCAN QR CODE ATAU LOGIN DI LAYAR SEKARANG <<<")
-        print(">>> Script akan menunggu sampai Anda berhasil login (maks 120 detik)... <<<")
-
-        start_t = time.time()
-        while time.time() - start_t < 120:
-            if is_user_logged_in(driver) or "login" not in driver.current_url.lower():
-                print("[LOGIN] Login Berhasil terdeteksi! Sesi tersimpan secara otomatis di profil.")
-                time.sleep(3)
-                return True
-            time.sleep(2)
-        
-        print("[LOGIN] Waktu tunggu login habis. Melanjutkan sebagai Guest...")
-        return False
-        
-    except Exception as e:
-        print(f"[ERROR] Gagal login atau waktu habis: {e}")
-        return False
+    print("[LOGIN] Sesi login belum terdeteksi (Guest Mode aktif). Melanjutkan pencarian...")
+    return True
 
 def ensure_page_loaded(driver, max_wait=8):
     """

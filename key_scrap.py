@@ -36,6 +36,106 @@ seen_lock = threading.Lock()
 global_seen_video_ids = set()
 
 # ==========================================
+# KONTROLER JEDA (PAUSE / RESUME / STOP)
+# ==========================================
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
+
+class PauseController:
+    """
+    Kontroler Jeda (Pause / Resume / Stop) Interaktif & Thread-Safe.
+    Mendengarkan penekanan tombol keyboard secara non-blocking di terminal Windows.
+    - Tekan 'P' atau 'Space' : Jeda (Pause) / Lanjut (Resume)
+    - Tekan 'Q'             : Berhenti secara aman & simpan seluruh data ke CSV
+    """
+    def __init__(self):
+        self.is_paused = False
+        self.stop_requested = False
+        self.lock = threading.Lock()
+        self._listener_thread = None
+        self._start_keyboard_listener()
+
+    def _start_keyboard_listener(self):
+        if not msvcrt:
+            return
+
+        def _worker():
+            while not self.stop_requested:
+                try:
+                    if msvcrt.kbhit():
+                        ch = msvcrt.getch()
+                        try:
+                            char = ch.decode('utf-8', errors='ignore').lower()
+                        except Exception:
+                            char = ''
+                        
+                        if char in ['p', ' ']:
+                            self.toggle_pause()
+                        elif char == 'q':
+                            self.request_stop()
+                except Exception:
+                    pass
+                time.sleep(0.08)
+
+        self._listener_thread = threading.Thread(target=_worker, daemon=True)
+        self._listener_thread.start()
+
+    def toggle_pause(self):
+        with self.lock:
+            self.is_paused = not self.is_paused
+            if self.is_paused:
+                print("\n" + "=" * 65)
+                print("  [PAUSED] SCRAPING DIJEDA / DIHENTIKAN SEMENTARA")
+                print("  Status : Seluruh data yang sudah di-scrape tersimpan AMAN di CSV.")
+                print("  -------------------------------------------------------------")
+                print("  * Tekan tombol [P] atau [SPACE] di keyboard untuk MELANJUTKAN (Resume).")
+                print("  * Tekan tombol [Q] di keyboard untuk BERHENTI & SIMPAN Hasil Sekarang.")
+                print("=" * 65 + "\n", flush=True)
+            else:
+                print("\n" + "=" * 65)
+                print("  [RESUMED] >> Melanjutkan proses scraping kembali...")
+                print("=" * 65 + "\n", flush=True)
+
+    def request_stop(self):
+        with self.lock:
+            self.stop_requested = True
+            self.is_paused = False
+            print("\n" + "=" * 65)
+            print("  [STOP REQUESTED] Menghentikan scraping secara aman & menyimpan seluruh data...")
+            print("=" * 65 + "\n", flush=True)
+
+    def is_stopped(self):
+        return self.stop_requested
+
+    def check_pause(self):
+        """
+        Tahan eksekusi selama status is_paused = True.
+        Mengembalikan True jika boleh lanjut, False jika user meminta stop.
+        """
+        while self.is_paused and not self.stop_requested:
+            time.sleep(0.2)
+        return not self.stop_requested
+
+    def sleep(self, seconds):
+        """
+        Pengganti time.sleep() yang responsif terhadap jeda (pause) & stop.
+        """
+        steps = max(1, int(seconds / 0.1))
+        for _ in range(steps):
+            if self.stop_requested:
+                break
+            while self.is_paused and not self.stop_requested:
+                time.sleep(0.2)
+            time.sleep(0.1)
+
+
+# Inisialisasi Kontroler Jeda Global
+pause_ctrl = PauseController()
+
+# ==========================================
 # 1. JAVASCRIPT INTERCEPTOR (FETCH & XHR)
 # ==========================================
 JS_INTERCEPTOR = """
@@ -539,11 +639,13 @@ def get_already_scraped_video_ids(comments_csv_path):
 def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv, max_comments=50, worker_prefix=""):
     if not video_url or not video_id:
         return 0
+    if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
+        return 0
         
     w_tag = f"[{worker_prefix}] " if worker_prefix else ""
     print(f"\n  {w_tag}Mengakses Video ID {video_id}: {video_url}")
     driver.get(video_url)
-    time.sleep(2.5)
+    pause_ctrl.sleep(2.5)
     ensure_page_loaded(driver, max_wait=6)
     dismiss_guest_popup(driver)
     
@@ -562,7 +664,7 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
         """)
     except Exception:
         pass
-    time.sleep(1.8)
+    pause_ctrl.sleep(1.8)
     
     seen_comment_ids = set()
     total_captured = 0
@@ -572,6 +674,9 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
     max_scrolls = 200 if max_comments == 0 else max(5, (max_comments // 15) + 5)
     
     for scroll_idx in range(max_scrolls):
+        if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
+            break
+
         dismiss_guest_popup(driver)
         new_in_batch = 0
         
@@ -684,7 +789,7 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
                 el.dispatchEvent(new WheelEvent('wheel', { deltaY: 1200, bubbles: true }));
             });
         """)
-        time.sleep(random.uniform(2.0, 3.2))
+        pause_ctrl.sleep(random.uniform(2.0, 3.2))
 
     print(f"  {w_tag}-> Selesai video {video_id}. Total {total_captured} komentar tersimpan.")
     return total_captured
@@ -702,13 +807,16 @@ def comment_scraping_worker(worker_id, video_queue, comments_csv, max_comments, 
     try:
         driver, _ = get_driver(worker_id=worker_id)
         driver.get("https://www.tiktok.com")
-        time.sleep(2)
+        pause_ctrl.sleep(2)
     except Exception as e:
         print(f"[ERROR] [{worker_tag}] Gagal membuka browser: {e}")
         return
 
     try:
         while True:
+            if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
+                break
+
             try:
                 v_data = video_queue.get_nowait()
             except queue.Empty:
@@ -729,7 +837,7 @@ def comment_scraping_worker(worker_id, video_queue, comments_csv, max_comments, 
                 worker_prefix=worker_tag
             )
             video_queue.task_done()
-            time.sleep(random.uniform(1.2, 2.2))
+            pause_ctrl.sleep(random.uniform(1.2, 2.2))
 
     finally:
         try:
@@ -906,12 +1014,21 @@ def run_scraper():
         else:
             print("[*] Mode Tanpa Login (Guest Mode) dipilih. Melanjutkan langsung...")
 
+        print("\n" + "=" * 65)
+        print("  [KONTROL JEDA AKTIF] KONTROL KEYBOARD INTERAKTIF:")
+        print("  * Tekan tombol [P] atau [SPASI] di keyboard untuk MENJEDA (Pause) / MELANJUTKAN.")
+        print("  * Tekan tombol [Q] di keyboard untuk BERHENTI & SIMPAN data yang sudah didapat.")
+        print("=" * 65)
+
         # -------------------------------------------------------------
         # TAHAP 1: PENCARIAN & DEDUP VIDEO LENGKAP
         # -------------------------------------------------------------
         collected_videos = []
         if mode in ["1", "2"]:
             for index, keyword in enumerate(keywords):
+                if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
+                    break
+
                 print(f"\n[{index+1}/{len(keywords)}] Memproses Keyword: '{keyword}'")
                 safe_keyword = urllib.parse.quote(keyword)
                 target_url = f"https://www.tiktok.com/search?q={safe_keyword}"
@@ -920,11 +1037,14 @@ def run_scraper():
                 consecutive_empty_scrolls = 0
                 max_empty_limit = 10
                 is_searching = True
-                time.sleep(3)
+                pause_ctrl.sleep(3)
                 ensure_page_loaded(driver_master, max_wait=8)
                 
                 scroll_count = 0
                 while is_searching:
+                    if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
+                        break
+
                     scroll_count += 1
                     data_found_in_batch = False
 
@@ -1065,10 +1185,10 @@ def run_scraper():
                         except Exception:
                             pass
 
-                    time.sleep(random.uniform(2.5, 3.8))
+                    pause_ctrl.sleep(random.uniform(2.5, 3.8))
                 
                 print(f"    -> Selesai keyword '{keyword}'. Total ditemukan: {len(global_seen_video_ids)} video unik.")
-                time.sleep(1.5)
+                pause_ctrl.sleep(1.5)
 
     finally:
         # Tutup browser master pencarian sebelum meluncurkan worker komentar

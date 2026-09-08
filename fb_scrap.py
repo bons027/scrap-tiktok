@@ -43,6 +43,112 @@ NOTIFICATION_BLACKLIST = [
     'jawab kuis'
 ]
 
+# Parameter URL Facebook untuk Filter 'Postingan Terbaru' (Chronological Recent Sort)
+# JSON Asli: {"rp_chrono_sort:0":"{\"name\":\"chronosort\",\"args\":\"\"}"}
+FB_CHRONOSORT_FILTER = "eyJycF9jaHJvbm9fc29ydDowIjoie1wibmFtZVwiOlwiY2hyb25vc29ydFwiLFwiYXJnc1wiOlwiXCJ9In0%3D"
+
+# ==========================================
+# KONTROLER JEDA (PAUSE / RESUME / STOP)
+# ==========================================
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
+
+class PauseController:
+    """
+    Kontroler Jeda (Pause / Resume / Stop) Interaktif & Thread-Safe.
+    Mendengarkan penekanan tombol keyboard secara non-blocking di terminal Windows.
+    - Tekan 'P' atau 'Space' : Jeda (Pause) / Lanjut (Resume)
+    - Tekan 'Q'             : Berhenti secara aman & simpan seluruh data ke CSV
+    """
+    def __init__(self):
+        import threading
+        self.is_paused = False
+        self.stop_requested = False
+        self.lock = threading.Lock()
+        self._listener_thread = None
+        self._start_keyboard_listener()
+
+    def _start_keyboard_listener(self):
+        if not msvcrt:
+            return
+
+        import threading
+        def _worker():
+            while not self.stop_requested:
+                try:
+                    if msvcrt.kbhit():
+                        ch = msvcrt.getch()
+                        try:
+                            char = ch.decode('utf-8', errors='ignore').lower()
+                        except Exception:
+                            char = ''
+                        
+                        if char in ['p', ' ']:
+                            self.toggle_pause()
+                        elif char == 'q':
+                            self.request_stop()
+                except Exception:
+                    pass
+                time.sleep(0.08)
+
+        self._listener_thread = threading.Thread(target=_worker, daemon=True)
+        self._listener_thread.start()
+
+    def toggle_pause(self):
+        with self.lock:
+            self.is_paused = not self.is_paused
+            if self.is_paused:
+                print("\n" + "=" * 65)
+                print("  [PAUSED] SCRAPING DIJEDA / DIHENTIKAN SEMENTARA")
+                print("  Status : Seluruh data yang sudah di-scrape tersimpan AMAN di CSV.")
+                print("  -------------------------------------------------------------")
+                print("  * Tekan tombol [P] atau [SPACE] di keyboard untuk MELANJUTKAN (Resume).")
+                print("  * Tekan tombol [Q] di keyboard untuk BERHENTI & SIMPAN Hasil Sekarang.")
+                print("=" * 65 + "\n", flush=True)
+            else:
+                print("\n" + "=" * 65)
+                print("  [RESUMED] >> Melanjutkan proses scraping kembali...")
+                print("=" * 65 + "\n", flush=True)
+
+    def request_stop(self):
+        with self.lock:
+            self.stop_requested = True
+            self.is_paused = False
+            print("\n" + "=" * 65)
+            print("  [STOP REQUESTED] Menghentikan scraping secara aman & menyimpan seluruh data...")
+            print("=" * 65 + "\n", flush=True)
+
+    def is_stopped(self):
+        return self.stop_requested
+
+    def check_pause(self):
+        """
+        Tahan eksekusi selama status is_paused = True.
+        Mengembalikan True jika boleh lanjut, False jika user meminta stop.
+        """
+        while self.is_paused and not self.stop_requested:
+            time.sleep(0.2)
+        return not self.stop_requested
+
+    def sleep(self, seconds):
+        """
+        Pengganti time.sleep() yang responsif terhadap jeda (pause) & stop.
+        """
+        steps = max(1, int(seconds / 0.1))
+        for _ in range(steps):
+            if self.stop_requested:
+                break
+            while self.is_paused and not self.stop_requested:
+                time.sleep(0.2)
+            time.sleep(0.1)
+
+
+# Inisialisasi Kontroler Jeda Global
+pause_ctrl = PauseController()
+
 
 # ==========================================
 # 1. CDP SCRIPT: STEALTH ANTI-BOT & GRAPHQL INTERCEPTOR
@@ -706,12 +812,15 @@ def exhaustively_scroll_and_extract_comments(driver, max_idle_scrolls=4, max_tot
     max_scroll_limit = 50
 
     while consecutive_no_new < max_idle_scrolls and total_scrolls < max_scroll_limit:
+        if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
+            break
+
         total_scrolls += 1
 
         # 1. Unfold semua thread balasan (deep replies) yang muncul di layar
         unfolded_replies = unfold_all_reply_threads(driver)
         if unfolded_replies > 0:
-            time.sleep(random.uniform(1.2, 1.8))
+            pause_ctrl.sleep(random.uniform(1.2, 1.8))
 
         # 2. Klik tombol 'Lihat komentar lainnya' / 'View more comments' utama
         clicked_expand = driver.execute_script("""
@@ -736,7 +845,7 @@ def exhaustively_scroll_and_extract_comments(driver, max_idle_scrolls=4, max_tot
 
         # 3. Scroll kontainer tengah dialog komentar dengan humanized jitter
         scroll_comment_container_center(driver, distance=random.randint(500, 650))
-        time.sleep(random.uniform(1.6, 2.5))
+        pause_ctrl.sleep(random.uniform(1.6, 2.5))
 
         # 4. Ekstrak komentar & balasan yang baru masuk
         extracted = extract_comments_from_active_container(driver)
@@ -853,9 +962,17 @@ def close_post_dialog(driver, search_url=None):
 def apply_recent_posts_filter(driver, retries=3):
     """
     Mengaktifkan filter 'Terbaru' / 'Postingan terbaru' pada feed pencarian Facebook atau grup.
-    Mendukung elemen switch presisi:
-    <input role="switch" type="checkbox" aria-label="Terbaru" ...>
+    Mendukung deteksi URL parameter filters= chronosort + elemen switch presisi di DOM.
     """
+    # 1. Cek apakah halaman sudah memuat parameter URL filter Postingan Terbaru
+    try:
+        curr_url = driver.current_url
+        if "eyJycF9jaHJvbm9fc29yd" in curr_url or "chronosort" in curr_url or "CHRONOLOGICAL" in curr_url:
+            print("  [*] URL sudah aktif memuat filter 'Postingan Terbaru' secara langsung.")
+            return True
+    except Exception:
+        pass
+
     for attempt in range(retries):
         try:
             res = driver.execute_script("""
@@ -940,14 +1057,14 @@ def apply_recent_posts_filter(driver, retries=3):
                     return True
                 elif status == 'clicked':
                     print(f"  [*] Filter '{label}' berhasil di-KLIK (diaktifkan)!")
-                    time.sleep(2.5)  # Tunggu feed Facebook me-refresh postingan terbaru
+                    pause_ctrl.sleep(2.5)  # Tunggu feed Facebook me-refresh postingan terbaru
                     return True
 
-        except Exception as e:
+        except Exception:
             pass
 
         if attempt < retries - 1:
-            time.sleep(1.2)
+            pause_ctrl.sleep(1.2)
 
     return False
 
@@ -977,7 +1094,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
     total_posts_saved = 0
     total_comments_saved = 0
     empty_scrolls = 0
-    search_url = custom_search_url or f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(keyword)}"
+    search_url = custom_search_url or f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(keyword)}&filters={FB_CHRONOSORT_FILTER}"
 
     title_info = f"Grup '{group_name}' | Kata Kunci: '{keyword}'" if group_name else f"Kata Kunci: '{keyword}'"
     print(f"\n" + "=" * 65)
@@ -993,6 +1110,9 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
     apply_recent_posts_filter(driver)
 
     while total_posts_saved < max_posts and empty_scrolls < 8:
+        if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
+            break
+
         # Pastikan modal dialog tertutup dan tetap di halaman pencarian
         close_post_dialog(driver, search_url=search_url)
 
@@ -1063,7 +1183,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
         if not next_post:
             empty_scrolls += 1
             perform_feed_scroll(driver, distance=650)
-            time.sleep(random.uniform(2.0, 3.2))
+            pause_ctrl.sleep(random.uniform(2.0, 3.2))
             continue
 
         # Postingan baru ditemukan
@@ -1128,7 +1248,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
             }
         """, dom_idx)
 
-        time.sleep(random.uniform(2.0, 2.8))
+        pause_ctrl.sleep(random.uniform(2.0, 2.8))
 
         # LANGKAH 3: UBAH FILTER MENJADI SEMUA KOMENTAR
         print("  [*] LANGKAH 3: Mengubah Filter Menjadi 'Semua Komentar'...")
@@ -1153,10 +1273,10 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
 
         # Tutup dialog postingan dan pastikan kembali ke feed pencarian (bukan tertahan di permalink)
         close_post_dialog(driver, search_url=search_url)
-        time.sleep(0.8)
+        pause_ctrl.sleep(0.8)
         # Scroll feed pencarian ke bawah sedikit untuk memuat postingan berikutnya
         perform_feed_scroll(driver, distance=400)
-        time.sleep(1.2)
+        pause_ctrl.sleep(1.2)
 
     print(f"\n[*] Selesai pencarian '{keyword}'. Total {total_posts_saved} post & {total_comments_saved} komentar tersimpan di '{comment_csv}'.")
 
@@ -1233,7 +1353,7 @@ def run_live_interactive_sniffer():
                 else:
                     print(f"[#{total_captured}] @{c_author} ({c_date}): \"{c_text}\" (likes: {c_likes})")
 
-            time.sleep(1.0)
+            pause_ctrl.sleep(1.0)
 
     except KeyboardInterrupt:
         print("\n\n" + "=" * 65)
@@ -1325,11 +1445,17 @@ def run_facebook_scraper():
     init_posts_csv(post_csv)
     init_comments_csv(comment_csv)
 
+    print("\n" + "=" * 65)
+    print("  [KONTROL JEDA AKTIF] KONTROL KEYBOARD INTERAKTIF:")
+    print("  * Tekan tombol [P] atau [SPASI] di keyboard untuk MENJEDA (Pause) / MELANJUTKAN.")
+    print("  * Tekan tombol [Q] di keyboard untuk BERHENTI & SIMPAN data yang sudah didapat.")
+    print("=" * 65)
+
     print("\n[*] Menjalankan browser Facebook...")
     try:
         driver, profile_dir = get_driver()
         driver.get("https://www.facebook.com")
-        time.sleep(3)
+        pause_ctrl.sleep(3)
     except Exception as e:
         print(f"[ERROR] Gagal membuka browser: {e}")
         return
@@ -1337,13 +1463,17 @@ def run_facebook_scraper():
     try:
         if mode == "1":
             for kw in keywords:
-                search_url = f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(kw)}"
+                if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
+                    break
+                search_url = f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(kw)}&filters={FB_CHRONOSORT_FILTER}"
                 driver.get(search_url)
-                time.sleep(3.5)
+                pause_ctrl.sleep(3.5)
                 process_search_workflow(driver, kw, post_csv, comment_csv, max_posts=max_posts_target, max_comments_per_post=max_comments_limit)
 
         elif mode == "2":
             for grp in groups:
+                if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
+                    break
                 grp_clean = grp.rstrip('/')
                 grp_slug = grp_clean.split('/')[-1]
 
@@ -1352,24 +1482,26 @@ def run_facebook_scraper():
                 print(f"[*] MEMBUKA GRUP FACEBOOK: {grp_clean}")
                 print("=" * 65)
                 driver.get(grp_clean)
-                time.sleep(3.5)
+                pause_ctrl.sleep(3.5)
 
                 for kw in keywords:
+                    if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
+                        break
                     if kw == "Feed Terbaru":
                         target_url = f"{grp_clean}/?sorting_setting=CHRONOLOGICAL"
                         print(f"[*] Membuka Feed Kronologis Terbaru di grup '{grp_slug}'...")
                         driver.get(target_url)
-                        time.sleep(3.5)
+                        pause_ctrl.sleep(3.5)
                         process_search_workflow(
                             driver, "Feed Terbaru", post_csv, comment_csv,
                             max_posts=max_posts_target, max_comments_per_post=max_comments_limit,
                             custom_search_url=target_url, group_name=grp_slug
                         )
                     else:
-                        target_url = f"{grp_clean}/search/?q={urllib.parse.quote(kw)}"
-                        print(f"[*] Melakukan pencarian '{kw}' di dalam grup '{grp_slug}'...")
+                        target_url = f"{grp_clean}/search/?q={urllib.parse.quote(kw)}&filters={FB_CHRONOSORT_FILTER}"
+                        print(f"[*] Melakukan pencarian '{kw}' di dalam grup '{grp_slug}' (Filter: Postingan Terbaru)...")
                         driver.get(target_url)
-                        time.sleep(3.5)
+                        pause_ctrl.sleep(3.5)
                         process_search_workflow(
                             driver, kw, post_csv, comment_csv,
                             max_posts=max_posts_target, max_comments_per_post=max_comments_limit,

@@ -1,12 +1,70 @@
 # ==============================================================================
-# DAFTAR LINK / ID GRUP FACEBOOK TARGET MONITORING HUMAS
+# DAFTAR TARGET MONITORING GRUP FACEBOOK (HUMAS PEMKAB / BUPATI KLATEN)
 # ==============================================================================
-# Masukkan 1 link grup per baris. Baris yang diawali '#' akan diabaikan.
-# Contoh format:
-# https://www.facebook.com/groups/namagrupwarga
-# https://www.facebook.com/groups/123456789012345
+# Format: Masukkan 1 tautan grup per baris.
+# Baris yang diawali tanda '#' akan diabaikan (dilewati) oleh script scraper.
+# Total Jangkauan: > 2,3 Juta Estimasi Akun Warga Klaten
 # ==============================================================================
 
-# Tambahkan link grup Facebook daerah Anda di bawah ini:
+# 1. Bisnis Warga Klaten (Est. 488.300 Anggota) [AKTIF]
+https://www.facebook.com/groups/365917661027259
+
+# 2. berita info klaten (Est. 316.000 Anggota) [AKTIF]
+https://www.facebook.com/groups/kotaklaten
+
+# 3. Bisnis Warga Klaten (Est. 297.900 Anggota) [AKTIF]
 https://www.facebook.com/groups/1514085288912852/
 
+# 4. Paguyuban CB Klaten (Est. 259.899 Anggota) [AKTIF]
+https://www.facebook.com/groups/675045635889173/
+
+# 5. KABAR KLATEN NEWS (Est. 216.700 Anggota) [AKTIF]
+https://www.facebook.com/sorotklaten
+
+# 7. Info cegatan klaten (ICK) (Est. 195.400 Anggota) [AKTIF]
+https://www.facebook.com/groups/923570167983917/
+
+# 8. Info Seputar KLaten - ISK (Est. 188.500 Anggota) [AKTIF]
+https://www.facebook.com/groups/361499332047169/
+
+
+# 9. ISK Info Seputar Klaten (Est. 157.000 Anggota) [AKTIF]
+https://www.facebook.com/groups/306701371248606/
+
+# 10. Info Klaten, info cegatan klaten, clothingan klaten (Est. 135.500 Anggota) [AKTIF]
+https://www.facebook.com/groups/632467115169881/
+
+https://www.facebook.com/groups/534423285440678/
+
+https://www.facebook.com/groups/1543209082644368/
+
+https://www.facebook.com/groups/4432098546883668/
+
+https://www.facebook.com/groups/357964808101481/
+
+https://www.facebook.com/groups/229795597519554/
+
+https://www.facebook.com/groups/1369000561119193/
+
+https://www.facebook.com/groups/474463971206814/
+
+https://www.facebook.com/groups/1088117718423429/
+
+https://www.facebook.com/groups/Cla.10
+
+https://www.facebook.com/groups/2284209118490762
+
+https://www.facebook.com/groups/1551911245113649/
+
+https://www.facebook.com/groups/1682958352072076/
+
+
+
+
+
+# ------------------------------------------------------------------------------
+# GRUP NON AKTIF / ARSIP (Diberi tanda '#' agar tidak di-scrape)
+# Hapus tanda '#' di bawah jika suatu saat grup ini ingin di-scrape:
+# ------------------------------------------------------------------------------
+# 6. ISK Info Seputar Klaten (Est. 198.800 Anggota) [NON AKTIF]
+ https://www.facebook.com/groups/632467115169881/

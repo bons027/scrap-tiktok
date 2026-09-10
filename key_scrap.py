@@ -15,6 +15,7 @@ import urllib.parse
 import threading
 import queue
 import glob
+import re
 from datetime import datetime
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
@@ -561,19 +562,57 @@ def load_keywords(filepath="keywords.txt"):
             
     return keywords
 
+def extract_hashtags(text):
+    if not text:
+        return ""
+    tags = re.findall(r'#[\w\u0590-\u05ff]+', str(text))
+    return ", ".join(tags) if tags else ""
+
+def detect_language(text):
+    if not text:
+        return "id"
+    t = str(text).lower()
+    jv_words = ['sing', 'nang', 'ning', 'kagem', 'panjenengan', 'lur', 'monggo', 'matur', 'nuwun', 'piye', 'niki', 'punika', 'mawon', 'mboten', 'sampun', 'menika', 'lho', 'wes', 'wis', 'nggih', 'nggon', 'rembug', 'isih', 'yoiki', 'karo', 'ora', 'iki', 'bocah', 'apik']
+    en_words = ['the', 'and', 'this', 'that', 'with', 'from', 'have', 'for', 'you', 'video', 'watch', 'today', 'welcome', 'great', 'about', 'people', 'city', 'best']
+    id_words = ['dan', 'yang', 'di', 'ini', 'itu', 'untuk', 'saya', 'dengan', 'ada', 'bisa', 'dari', 'tidak', 'sudah', 'akan', 'kami', 'mereka', 'kita', 'ke', 'pada', 'adalah']
+    
+    tokens = re.findall(r'\b\w+\b', t)
+    if not tokens:
+        return "id"
+    
+    jv_cnt = sum(1 for w in tokens if w in jv_words)
+    en_cnt = sum(1 for w in tokens if w in en_words)
+    id_cnt = sum(1 for w in tokens if w in id_words)
+    
+    if jv_cnt > 0 and jv_cnt >= en_cnt and jv_cnt >= id_cnt:
+        return "jv"
+    if en_cnt > id_cnt and en_cnt > jv_cnt:
+        return "en"
+    return "id"
+
 def init_csv(filename):
     with csv_lock:
         if not os.path.isfile(filename):
             with open(filename, mode='w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow(['search_keyword', 'video_id', 'upload_date', 'username', 'description', 'play_count', 'digg_count', 'comment_count', 'video_url'])
+                writer.writerow([
+                    'platform', 'search_keyword', 'post_id', 'post_date', 'profile_name',
+                    'profile_url', 'bio', 'followers_count', 'following_count', 'followers_list',
+                    'following_list', 'description', 'likes', 'shares', 'plays',
+                    'comments_count', 'video_subtitles', 'text_language', 'hashtags_used',
+                    'is_ad', 'is_pinned', 'is_sponsored', 'location_of_creation', 'music_meta', 'video_url'
+                ])
 
 def init_comments_csv(filename):
     with csv_lock:
         if not os.path.isfile(filename):
             with open(filename, mode='w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow(['video_id', 'search_keyword', 'comment_id', 'comment_date', 'username', 'nickname', 'comment_text', 'likes', 'reply_count', 'video_url'])
+                writer.writerow([
+                    'platform', 'search_keyword', 'post_id', 'comment_id', 'comment_date',
+                    'profile_name', 'username', 'profile_url', 'comment_text', 'likes',
+                    'reply_count', 'is_reply', 'reply_to', 'video_url'
+                ])
 
 def save_to_csv(filename, data_row):
     """
@@ -584,7 +623,46 @@ def save_to_csv(filename, data_row):
             writer = csv.writer(f)
             writer.writerow(data_row)
 
-def load_videos_from_csv(csv_path):
+def is_outdated_post(date_str, min_year=2025):
+    """
+    Mengecek apakah tanggal postingan/video lebih tua dari min_year (contoh: 2024, 2023, 2022).
+    - Jika memuat tahun eksplisit (misal '2024-11-05', '15 Agustus 2024') dan tahun < min_year -> True (Outdated).
+    - Jika memuat durasi tahun relatif (misal '2 thn lalu', '3 tahun lalu', '2 yrs ago') -> dihitung berdasarkan tahun berjalan.
+    - Jika tanggal relatif baru atau tahun >= min_year -> False (Terkini).
+    """
+    if not date_str:
+        return False
+    d = str(date_str).strip()
+    
+    # 1. Cek tahun 4 digit eksplisit (1990 - 2099)
+    years = re.findall(r'\b(19\d{2}|20\d{2})\b', d)
+    if years:
+        for y_str in years:
+            try:
+                y = int(y_str)
+                if 1990 <= y < min_year:
+                    return True
+                elif y >= min_year:
+                    return False
+            except Exception:
+                pass
+
+    # 2. Cek format relatif dalam hitungan tahun (contoh: "2 thn lalu", "3 tahun yang lalu", "2 yrs ago")
+    rel_match = re.search(r'(\d+)\s*(?:thn|th|tahun|yr|yrs|year|years)\b', d, re.IGNORECASE)
+    if rel_match:
+        try:
+            n_years = int(rel_match.group(1))
+            current_year = datetime.now().year
+            est_year = current_year - n_years
+            if est_year < min_year:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
+def load_videos_from_csv(csv_path, min_year=2025):
     if not os.path.exists(csv_path):
         cand = os.path.join(RESULTS_DIR, csv_path)
         if os.path.exists(cand):
@@ -598,9 +676,18 @@ def load_videos_from_csv(csv_path):
     with open(csv_path, mode='r', encoding='utf-8', errors='replace') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            vid_id = str(row.get('video_id', '')).strip()
-            vid_url = row.get('video_url', '').strip()
-            kw = row.get('search_keyword', 'Unknown').strip()
+            row_lower = {k.lower().strip(): v for k, v in row.items() if k and v}
+            vid_id = str(row_lower.get('post_id') or row_lower.get('video_id') or '').strip()
+            vid_url = (row_lower.get('video_url') or row_lower.get('post_url') or '').strip()
+            kw = (row_lower.get('search_keyword') or 'Unknown').strip()
+            u_date = (row_lower.get('post_date') or row_lower.get('upload_date') or '').strip()
+            u_name = (row_lower.get('profile_name') or row_lower.get('username') or row_lower.get('author_name') or '').strip()
+            u_desc = (row_lower.get('description') or row_lower.get('post_text') or '').strip()
+
+            # Filter tahun jika tanggal terdeteksi lebih usang dari min_year
+            if u_date and is_outdated_post(u_date, min_year=min_year):
+                continue
+
             # Hindari duplikasi ID video saat memuat CSV
             if vid_id and vid_url and vid_id.lower() != 'none' and vid_id not in seen_ids:
                 seen_ids.add(vid_id)
@@ -608,8 +695,9 @@ def load_videos_from_csv(csv_path):
                     'video_id': vid_id,
                     'video_url': vid_url,
                     'keyword': kw,
-                    'username': row.get('username', ''),
-                    'description': row.get('description', '')
+                    'username': u_name,
+                    'description': u_desc,
+                    'upload_date': u_date
                 })
     return videos
 
@@ -626,9 +714,12 @@ def get_already_scraped_video_ids(comments_csv_path):
         with open(comments_csv_path, mode='r', encoding='utf-8', errors='replace') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                v_id = str(row.get('video_id', '')).strip()
-                if v_id and v_id.lower() != 'none' and v_id != 'video_id':
+                row_lower = {k.lower().strip(): v for k, v in row.items() if k and v}
+                v_id = str(row_lower.get('post_id') or row_lower.get('video_id') or '').strip()
+                if v_id and v_id.lower() != 'none' and v_id not in ['video_id', 'post_id']:
                     scraped_ids.add(v_id)
+    except Exception:
+        pass
     except Exception:
         pass
     return scraped_ids
@@ -713,8 +804,11 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
                             except Exception:
                                 cdate = "Error"
                                 
+                            prof_url = f"https://www.tiktok.com/@{uname}" if uname and uname != 'Unknown' else ""
                             save_to_csv(comments_csv, [
-                                video_id, keyword, cid, cdate, uname, nname, txt, likes, replies, video_url
+                                "TikTok", keyword, video_id, cid, cdate,
+                                nname, uname, prof_url, txt, likes,
+                                replies, "No", "", video_url
                             ])
                             new_in_batch += 1
                             total_captured += 1
@@ -741,6 +835,7 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
                         cid: 'dom_' + idx,
                         username: uname || 'Unknown',
                         nickname: user || 'Unknown',
+                        user_url: user_url || '',
                         text: text
                     });
                 }
@@ -752,8 +847,11 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
                 cid = c['cid']
                 if cid not in seen_comment_ids:
                     seen_comment_ids.add(cid)
+                    dom_prof_url = c.get('user_url') or (f"https://www.tiktok.com/@{c['username']}" if c['username'] != 'Unknown' else "")
                     save_to_csv(comments_csv, [
-                        video_id, keyword, cid, "Unknown", c['username'], c['nickname'], c['text'], 0, 0, video_url
+                        "TikTok", keyword, video_id, cid, "Unknown",
+                        c['nickname'], c['username'], dom_prof_url, c['text'], 0,
+                        0, "No", "", video_url
                     ])
                     new_in_batch += 1
                     total_captured += 1
@@ -858,6 +956,7 @@ def run_scraper():
     parser.add_argument("--keyword", type=str, help="Kata kunci tunggal pencarian")
     parser.add_argument("--max-comments", type=int, help="Maksimal komentar per video")
     parser.add_argument("--max-videos", type=int, help="Maksimal video yang diproses")
+    parser.add_argument("--min-year", type=int, default=2025, help="Tahun minimal video yang diambil (default: 2025)")
     parser.add_argument("--no-login", action="store_true", help="Gunakan Guest Mode (tanpa login)")
     args, unknown = parser.parse_known_args()
 
@@ -885,6 +984,7 @@ def run_scraper():
     max_comments_per_video = args.max_comments or 50
     max_videos_for_comments = args.max_videos or 0
     num_workers = args.workers or 1
+    min_post_year = args.min_year or 2025
 
     if mode in ["1", "2"]:
         if args.keyword:
@@ -933,7 +1033,7 @@ def run_scraper():
             print(f"\n[*] File CSV video terdeteksi: {', '.join(found_csvs[:5])}")
 
         csv_source = input(f"Masukkan nama file CSV sumber video (default: {default_csv}): ").strip() or default_csv
-        existing_videos = load_videos_from_csv(csv_source)
+        existing_videos = load_videos_from_csv(csv_source, min_year=min_post_year)
         if not existing_videos:
             return
             
@@ -1025,6 +1125,7 @@ def run_scraper():
         # -------------------------------------------------------------
         collected_videos = []
         if mode in ["1", "2"]:
+            print(f"\n[*] Filter Periode Video : Minimal Tahun {min_post_year} ke atas (Video <= {min_post_year-1} dilewati otomatis)")
             for index, keyword in enumerate(keywords):
                 if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
                     break
@@ -1072,6 +1173,84 @@ def run_scraper():
                                         vid_id = str(vid_obj.get('id', ''))
                                         if not vid_id: continue
 
+                                        author_dict = vid_obj.get('author', {}) or {}
+                                        author_nickname = author_dict.get('nickname', 'Unknown')
+                                        author_unique_id = author_dict.get('uniqueId', 'Unknown')
+                                        author_profile_url = f"https://www.tiktok.com/@{author_unique_id}" if author_unique_id and author_unique_id != 'Unknown' else ""
+                                        author_bio = author_dict.get('signature', '') or ""
+
+                                        author_stats = vid_obj.get('authorStats', {}) or author_dict.get('stats', {}) or {}
+                                        followers_count = author_stats.get('followerCount', 0)
+                                        following_count = author_stats.get('followingCount', 0)
+
+                                        desc = vid_obj.get('desc', '') or ""
+                                        stats = vid_obj.get('stats', {}) or vid_obj.get('statsV2', {}) or {}
+                                        
+                                        likes = stats.get('diggCount', 0)
+                                        shares = stats.get('shareCount', 0)
+                                        plays = stats.get('playCount', 0)
+                                        comment_count = stats.get('commentCount', 0)
+
+                                        # Subtitel
+                                        video_meta = vid_obj.get('video', {}) or {}
+                                        sub_infos = video_meta.get('subtitleInfos', []) or video_meta.get('claInfo', {}).get('captionInfos', []) or []
+                                        subtitles_list = [f"{s.get('lang', '')}: {s.get('text', '')}".strip() for s in sub_infos if isinstance(s, dict)]
+                                        video_subtitles = " | ".join(subtitles_list) if subtitles_list else ""
+
+                                        # Hashtags
+                                        text_extra = vid_obj.get('textExtra', []) or []
+                                        tag_names = []
+                                        for t_ext in text_extra:
+                                            if isinstance(t_ext, dict) and t_ext.get('hashtagName'):
+                                                tag_names.append(f"#{t_ext['hashtagName']}")
+                                        challenges = vid_obj.get('challenges', []) or []
+                                        for ch in challenges:
+                                            if isinstance(ch, dict) and ch.get('title'):
+                                                tag_names.append(f"#{ch['title']}")
+                                        if not tag_names:
+                                            hashtags_used = extract_hashtags(desc)
+                                        else:
+                                            seen_tags = set()
+                                            dedup_tags = []
+                                            for tag in tag_names:
+                                                if tag.lower() not in seen_tags:
+                                                    seen_tags.add(tag.lower())
+                                                    dedup_tags.append(tag)
+                                            hashtags_used = ", ".join(dedup_tags)
+
+                                        text_language = detect_language(desc)
+
+                                        # Ad / Pinned / Sponsored
+                                        is_ad = "Yes" if (vid_obj.get('isAd') or vid_obj.get('is_ad') or vid_obj.get('ad_info') or vid_obj.get('is_ad_label')) else "No"
+                                        is_pinned = "Yes" if (vid_obj.get('isTop') or vid_obj.get('isPinned')) else "No"
+                                        is_sponsored = "Yes" if (vid_obj.get('isCommerce') or vid_obj.get('isItemCommerce') or vid_obj.get('isSponsored') or vid_obj.get('brandOrganicType') == 1) else "No"
+
+                                        # Location
+                                        poi = vid_obj.get('poi', {}) or {}
+                                        location_of_creation = poi.get('name') or vid_obj.get('locationCreated', '') or ""
+
+                                        # Music Meta
+                                        music_dict = vid_obj.get('music', {}) or {}
+                                        m_title = music_dict.get('title', '')
+                                        m_author = music_dict.get('authorName', '')
+                                        music_meta = f"{m_title} - {m_author}".strip(' -') if (m_title or m_author) else ""
+
+                                        create_time_unix = vid_obj.get('createTime')
+                                        upload_date = "Terkini"
+                                        upload_year = None
+                                        if create_time_unix:
+                                            try:
+                                                dt = datetime.fromtimestamp(int(create_time_unix))
+                                                upload_date = dt.strftime('%Y-%m-%d %H:%M:%S')
+                                                upload_year = dt.year
+                                            except Exception:
+                                                upload_date = "Error"
+
+                                        # FILTER TAHUN: Lewati video usang (misal tahun 2024 atau lebih lama)
+                                        if (upload_year and upload_year < min_post_year) or is_outdated_post(upload_date, min_year=min_post_year) or is_outdated_post(desc, min_year=min_post_year):
+                                            print(f"    [DILEWATI] Video Usang ({upload_date}) @{author_unique_id}: \"{desc[:35]}...\" (Filter aktif: Hanya tahun {min_post_year}+)")
+                                            continue
+
                                         # DEDUKPLIKASI KETAT: Cek apakah ID video sudah pernah ditemukan
                                         with seen_lock:
                                             if vid_id in global_seen_video_ids:
@@ -1079,23 +1258,14 @@ def run_scraper():
                                             global_seen_video_ids.add(vid_id)
 
                                         data_found_in_batch = True
-                                        author_nickname = vid_obj.get('author', {}).get('nickname', 'Unknown')
-                                        author_unique_id = vid_obj.get('author', {}).get('uniqueId', 'Unknown')
-                                        desc = vid_obj.get('desc', '')
-                                        stats = vid_obj.get('stats', {})
-                                        
-                                        create_time_unix = vid_obj.get('createTime')
-                                        try:
-                                            upload_date = datetime.fromtimestamp(int(create_time_unix)).strftime('%Y-%m-%d %H:%M:%S') if create_time_unix else "Unknown"
-                                        except Exception:
-                                            upload_date = "Error"
-
                                         vid_url = f"https://www.tiktok.com/@{author_unique_id}/video/{vid_id}"
                                         
                                         save_to_csv(video_csv, [
-                                            keyword, vid_id, upload_date, author_nickname, desc, 
-                                            stats.get('playCount', 0), stats.get('diggCount', 0), 
-                                            stats.get('commentCount', 0), vid_url
+                                            "TikTok", keyword, vid_id, upload_date, author_nickname,
+                                            author_profile_url, author_bio, followers_count, following_count, "",
+                                            "", desc, likes, shares, plays,
+                                            comment_count, video_subtitles, text_language, hashtags_used,
+                                            is_ad, is_pinned, is_sponsored, location_of_creation, music_meta, vid_url
                                         ])
                                         
                                         collected_videos.append({
@@ -1106,7 +1276,7 @@ def run_scraper():
                                             'description': desc
                                         })
                                         
-                                        print(f"    + [#{len(global_seen_video_ids)}] [{upload_date}] {desc[:35]}... ({stats.get('commentCount', 0)} komentar)")
+                                        print(f"    + [#{len(global_seen_video_ids)}] [{upload_date}] {desc[:35]}... ({comment_count} komentar)")
 
                     # 2. Ekstrak Fallback dari DOM HTML
                     try:
@@ -1122,10 +1292,15 @@ def run_scraper():
                                     let vid_id = href.includes('/video/') ? href.split('/video/')[1].split('?')[0].split('/')[0] : '';
                                     let authorEl = c.querySelector('a[href*="/@"], [data-e2e="search-card-user-unique-id"], [data-e2e="search-card-user-link"]');
                                     let author = authorEl ? (authorEl.innerText || '').trim() : 'Unknown';
+                                    let authorUrl = authorEl ? (authorEl.href || '') : '';
                                     let descEl = c.querySelector('[data-e2e="search-card-video-caption"], [class*="DivVideoDesc"], [class*="PVideoDesc"]');
                                     let desc = descEl ? (descEl.innerText || '').trim() : '';
+                                    let playsEl = c.querySelector('[data-e2e="video-views"], [class*="video-count"]');
+                                    let playsTxt = playsEl ? (playsEl.innerText || '').trim() : '0';
+                                    let musicEl = c.querySelector('a[href*="/music/"], [data-e2e="search-card-music"]');
+                                    let musicTxt = musicEl ? (musicEl.innerText || '').trim() : '';
                                     if (vid_id) {
-                                        results.push({ id: vid_id, url: href, author: author, desc: desc });
+                                        results.push({ id: vid_id, url: href, author: author, author_url: authorUrl, desc: desc, plays: playsTxt, music: musicTxt });
                                     }
                                 }
                             }
@@ -1136,6 +1311,20 @@ def run_scraper():
                                 d_id = str(dv.get('id', ''))
                                 if not d_id: continue
 
+                                d_author = dv.get('author', 'Unknown')
+                                d_author_url = dv.get('author_url', '')
+                                d_desc = dv.get('desc', '')
+                                d_url = dv.get('url', '')
+                                d_plays = dv.get('plays', 0)
+                                d_music = dv.get('music', '')
+                                d_tags = extract_hashtags(d_desc)
+                                d_lang = detect_language(d_desc)
+
+                                # FILTER TAHUN: Lewati video usang jika deskripsi memuat tahun lama
+                                if is_outdated_post(d_desc, min_year=min_post_year):
+                                    print(f"    [DILEWATI] Video Usang (DOM) @{d_author}: \"{d_desc[:35]}...\" (Filter aktif: Hanya tahun {min_post_year}+)")
+                                    continue
+
                                 # DEDUKPLIKASI KETAT
                                 with seen_lock:
                                     if d_id in global_seen_video_ids:
@@ -1143,12 +1332,13 @@ def run_scraper():
                                     global_seen_video_ids.add(d_id)
 
                                 data_found_in_batch = True
-                                d_url = dv.get('url', '')
-                                d_author = dv.get('author', 'Unknown')
-                                d_desc = dv.get('desc', '')
                                 
                                 save_to_csv(video_csv, [
-                                    keyword, d_id, "Terkini", d_author, d_desc, 0, 0, 0, d_url
+                                    "TikTok", keyword, d_id, "Terkini", d_author,
+                                    d_author_url, "", 0, 0, "",
+                                    "", d_desc, 0, 0, d_plays,
+                                    0, "", d_lang, d_tags,
+                                    "No", "No", "No", "", d_music, d_url
                                 ])
                                 collected_videos.append({
                                     'video_id': d_id,
@@ -1158,6 +1348,8 @@ def run_scraper():
                                     'description': d_desc
                                 })
                                 print(f"    + [#{len(global_seen_video_ids)}] [DOM] {d_desc[:35]}... (@{d_author})")
+                    except Exception:
+                        pass
                     except Exception:
                         pass
 

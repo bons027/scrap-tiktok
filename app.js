@@ -290,9 +290,9 @@ function applyFilters() {
     filteredRecords = allRecords.filter(r => {
         const rSent = r.sentiment || "Netral";
         const rTopic = r.topic || "Lain-lain";
-        const rText = (r.comment_text || "").toLowerCase();
+        const rText = (r.comment_text || r.description || r.post_text || "").toLowerCase();
         const rPoint = (r.key_point || "").toLowerCase();
-        const rUser = (r.username || "").toLowerCase();
+        const rUser = (r.profile_name || r.username || r.author_name || "").toLowerCase();
 
         if (sVal !== "ALL" && rSent !== sVal) return false;
         if (tVal !== "ALL" && rTopic !== tVal) return false;
@@ -308,11 +308,11 @@ function renderTable(records) {
     const limit = 200;
     const displayed = records.slice(0, limit);
     tableInfo.textContent = records.length > limit 
-        ? `Menampilkan ${limit} dari ${records.length.toLocaleString("id-ID")} komentar (Total dataset: ${allRecords.length.toLocaleString("id-ID")})`
-        : `Menampilkan ${records.length.toLocaleString("id-ID")} dari ${allRecords.length.toLocaleString("id-ID")} komentar`;
+        ? `Menampilkan ${limit} dari ${records.length.toLocaleString("id-ID")} baris data (Total dataset: ${allRecords.length.toLocaleString("id-ID")})`
+        : `Menampilkan ${records.length.toLocaleString("id-ID")} dari ${allRecords.length.toLocaleString("id-ID")} baris data`;
 
     if (records.length === 0) {
-        commentsTbody.innerHTML = '<tr><td colspan="6" class="text-center py-4" style="text-align:center; padding: 20px;">Tidak ada komentar yang cocok dengan filter.</td></tr>';
+        commentsTbody.innerHTML = '<tr><td colspan="6" class="text-center py-4" style="text-align:center; padding: 20px;">Tidak ada data yang cocok dengan filter.</td></tr>';
         return;
     }
 
@@ -321,9 +321,9 @@ function renderTable(records) {
         const sentClass = sent.toLowerCase();
         const topic = r.topic || "-";
         const keyPoint = r.key_point || "-";
-        const text = r.comment_text || "";
-        const likes = r.likes || 0;
-        const user = r.username || "Anonim";
+        const text = r.comment_text || r.description || r.post_text || "";
+        const likes = r.likes || r.reactions_count || 0;
+        const user = r.profile_name || r.username || r.author_name || "Anonim";
         const score = r.sentiment_score ? parseFloat(r.sentiment_score) : null;
         const scoreDisplay = score ? ` <span style="font-size:0.72rem; opacity:0.85; font-weight:600;">(${Math.round(Math.abs(score) * 100)}%)</span>` : "";
 
@@ -334,7 +334,7 @@ function renderTable(records) {
                 <td style="font-weight: 600; color: #e2e8f0;">${keyPoint}</td>
                 <td style="max-width: 420px; line-height: 1.4;">${escapeHtml(text)}</td>
                 <td style="font-weight: 600; color: #94a3b8;">${likes}</td>
-                <td style="color: #60a5fa;">@${escapeHtml(user)}</td>
+                <td style="color: #60a5fa;">${escapeHtml(user)}</td>
             </tr>
         `;
     }).join("");

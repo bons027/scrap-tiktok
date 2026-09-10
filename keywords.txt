@@ -1,7 +1,8 @@
 # Masukkan keyword pencarian TikTok di bawah ini (1 keyword per baris)
 # Baris yang diawali dengan '#' akan diabaikan
-hamenang 
-hamenang 
+Hamenang 
+Pemerintah
+Bantuan
 Bupati
-Dalane Bosok
+Dalan Rusak
 Desil

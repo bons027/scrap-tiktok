@@ -19,7 +19,12 @@ Platform monitoring dan intelligence media sosial berbasis **Python, Selenium (`
 - **4-Langkah Otomatisasi Komentar**: Otomatis klik postingan -> ubah filter ke *"Semua komentar"* -> scroll sampai habis -> simpan ke CSV.
 - **Live Interceptor Mode**: Bebas scroll/klik di browser secara manual, script otomatis menyedot seluruh komentar ke CSV.
 
-### 3. AI Sentiment & Topic Analyzer (`analyzer.py` & `app.py`)
+### 3. Online Media & News Intelligence Scraper (`news_scrap.py`)
+- **Search Engine Multi-Portal Aggregator**: Mengumpulkan berita dari berbagai portal media nasional & daerah (Detik, Kompas, Solopos/Espos, Tribunnews, LKBN Antara, Tempo, Liputan6, CNN Indonesia, Radar Solo, dll.).
+- **Automatic Content Parsing**: Mengekstrak judul berita, nama jurnalis/wartawan, waktu publikasi, lokasi kejadian (dateline), topik tags, ringkasan, dan teks isi lengkap berita.
+- **Standar 25 Kolom Terpadu**: Format output CSV 100% konsisten dengan TikTok dan Facebook scraper sehingga langsung siap dianalisis AI.
+
+### 4. AI Sentiment & Topic Analyzer (`analyzer.py` & `app.py`)
 - **Klasifikasi Topik Otomatis**: Infrastruktur, Pelayanan Publik, Pendidikan, Bansos, UMKM, dll.
 - **Analisis Sentimen**: Positif, Netral, Negatif menggunakan IndoBERT / Gemini AI.
 - **Ringkasan Eksekutif AI**: Membuat laporan ringkas rekomendasi kebijakan untuk Bupati/Pimpinan.
@@ -74,13 +79,23 @@ python fb_scrap.py
 python key_scrap.py
 ```
 
-### 4. Buka Dashboard Web & Analisis AI
+### 4. Jalankan Online Media Scraper
+```bash
+python news_scrap.py
+```
+*Atau klik dua kali file `buka_media.bat`.*
+- Masukkan kata kunci atau baca otomatis dari `keywords.txt`.
+- Pilih mesin pencari (Semua portal media, Detik, Kompas, Solopos, Antara, Tribun, dll.).
+- Data otomatis tersimpan di `results/` dengan format standar 25 kolom.
+
+### 5. Buka Dashboard Web & Analisis AI
 ```bash
 python app.py
 ```
-Buka browser ke `http://localhost:5000`, pilih file komentar CSV hasil scraping, dan klik **"Mulai Analisis AI"**.
+Buka browser ke `http://localhost:5000`, pilih file CSV hasil scraping, dan klik **"Mulai Analisis AI"**.
 
-### 5. Pintasan Cepat Browser
+### 6. Pintasan Cepat & Launcher (.bat)
+- `buka_media.bat`: Menjalankan Online Media Scraper secara instan.
 - `buka_facebook.bat`: Membuka browser Chrome langsung dengan cookies Facebook scraper.
 - `buka_tiktok.bat`: Membuka browser Chrome langsung dengan cookies TikTok scraper.
 

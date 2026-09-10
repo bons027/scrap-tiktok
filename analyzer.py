@@ -106,15 +106,15 @@ def analyze_comments_df(df, api_key=None, batch_size=30, progress_callback=None)
     """
     client = get_gemini_client(api_key=api_key)
     
-    # Pastikan ada kolom komentar
+    # Pastikan ada kolom komentar / teks postingan
     comment_col = None
-    for col in ['comment_text', 'text', 'comment', 'isi_komentar']:
+    for col in ['comment_text', 'description', 'post_text', 'text', 'comment', 'isi_komentar']:
         if col in df.columns:
             comment_col = col
             break
             
     if not comment_col:
-        raise ValueError(f"Kolom teks komentar tidak ditemukan dalam DataFrame! Kolom yang ada: {list(df.columns)}")
+        raise ValueError(f"Kolom teks (comment_text/description) tidak ditemukan dalam DataFrame! Kolom yang ada: {list(df.columns)}")
         
     total_rows = len(df)
     results = {}
@@ -190,13 +190,21 @@ def generate_executive_summary(df, api_key=None):
     sentiment_counts = df['sentiment'].value_counts().to_dict()
     topic_counts = df['topic'].value_counts().head(6).to_dict()
     
+    # Deteksi kolom teks
+    text_col = None
+    for col in ['comment_text', 'description', 'post_text', 'text', 'comment', 'isi_komentar']:
+        if col in df.columns:
+            text_col = col
+            break
+    text_col = text_col or 'comment_text'
+
     # Ambil sampel keluhan negatif utama
-    neg_samples = df[df['sentiment'] == 'Negatif']['comment_text'].dropna().head(8).tolist()
+    neg_samples = df[df['sentiment'] == 'Negatif'][text_col].dropna().head(8).tolist() if text_col in df.columns else []
     # Ambil sampel apresiasi positif utama
-    pos_samples = df[df['sentiment'] == 'Positif']['comment_text'].dropna().head(5).tolist()
+    pos_samples = df[df['sentiment'] == 'Positif'][text_col].dropna().head(5).tolist() if text_col in df.columns else []
     
     summary_prompt = f"""
-Berikut adalah rangkuman data opini publik dari {total} komentar TikTok warga mengenai pimpinan/pemerintah daerah:
+Berikut adalah rangkuman data opini publik dari {total} data/komentar media sosial warga mengenai pimpinan/pemerintah daerah:
 
 STATISTIK SENTIMEN:
 {json.dumps(sentiment_counts, indent=2)}

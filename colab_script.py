@@ -44,15 +44,15 @@ sentiment_pipe = pipeline(
     max_length=128
 )
 
-# 4. Deteksi Kolom Komentar
+# 4. Deteksi Kolom Komentar / Teks Postingan
 comment_col = None
-for col in ['comment_text', 'text', 'comment', 'isi_komentar']:
+for col in ['comment_text', 'description', 'post_text', 'text', 'comment', 'isi_komentar']:
     if col in df.columns:
         comment_col = col
         break
 
 if not comment_col:
-    raise ValueError(f"Kolom komentar tidak ditemukan. Kolom yang ada: {list(df.columns)}")
+    raise ValueError(f"Kolom teks (comment_text/description) tidak ditemukan. Kolom yang ada: {list(df.columns)}")
 
 texts = df[comment_col].fillna("").astype(str).tolist()
 print(f"[*] Memproses {len(texts)} komentar di GPU...")

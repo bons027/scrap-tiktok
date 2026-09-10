@@ -93,13 +93,13 @@ def run_background_analysis(filepath, api_key=None):
         
         df = pd.read_csv(filepath)
         comment_col = None
-        for col in ['comment_text', 'text', 'comment', 'isi_komentar']:
+        for col in ['comment_text', 'description', 'post_text', 'text', 'comment', 'isi_komentar']:
             if col in df.columns:
                 comment_col = col
                 break
                 
         if not comment_col:
-            raise ValueError("Kolom komentar tidak ditemukan di file CSV.")
+            raise ValueError("Kolom teks (comment_text/description) tidak ditemukan di file CSV.")
             
         valid_indices = df[df[comment_col].notna() & (df[comment_col].str.strip() != "")].index.tolist()
         batch_size = 30
@@ -209,9 +209,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 df = pd.read_csv(fpath)
                 total = len(df)
 
-                # Deteksi kolom komentar
+                # Deteksi kolom komentar / teks
                 comment_col = None
-                for col in ['comment_text', 'text', 'comment', 'isi_komentar']:
+                for col in ['comment_text', 'description', 'post_text', 'text', 'comment', 'isi_komentar']:
                     if col in df.columns:
                         comment_col = col
                         break

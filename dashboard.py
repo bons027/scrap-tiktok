@@ -92,10 +92,11 @@ COLOR_MAP = {
 # ==========================================
 st.sidebar.title("⚙️ Kontrol & Data")
 
-# Deteksi file CSV yang ada di direktori
-csv_files = glob.glob("*.csv")
-comment_files = [f for f in csv_files if "comment" in f.lower()]
-available_files = comment_files if comment_files else csv_files
+# Deteksi file CSV yang ada di direktori root dan results/
+csv_files = glob.glob("*.csv") + glob.glob("results/*.csv")
+# Urutkan berdasarkan waktu modifikasi terbaru
+csv_files = sorted(list(set(csv_files)), key=lambda x: os.path.getmtime(x) if os.path.exists(x) else 0, reverse=True)
+available_files = csv_files
 
 if not available_files:
     st.sidebar.warning("Tidak ditemukan file CSV di folder ini. Silakan jalankan scraper terlebih dahulu.")
@@ -178,8 +179,11 @@ if not ('sentiment' in df_raw.columns and 'topic' in df_raw.columns):
     st.info("👉 Masukkan Gemini API Key di sidebar sebelah kiri, lalu klik tombol **'Mulai Analisis AI (Gemini Flash)'** untuk menganalisis komentar ini secara otomatis!")
     
     # Preview data mentah
-    st.subheader("Preview Komentar Mentah:")
-    st.dataframe(df_raw[['username', 'comment_text', 'likes', 'video_url']].head(10), use_container_width=True)
+    st.subheader("Preview Data Mentah:")
+    preview_cols = [c for c in ['platform', 'profile_name', 'username', 'comment_text', 'description', 'likes', 'video_url', 'post_url'] if c in df_raw.columns]
+    if not preview_cols:
+        preview_cols = df_raw.columns[:6].tolist()
+    st.dataframe(df_raw[preview_cols].head(10), use_container_width=True)
     st.stop()
 
 df = df_raw.copy()
@@ -222,7 +226,7 @@ c1, c2, c3, c4, c5 = st.columns(5)
 with c1:
     st.markdown(f"""
     <div class="metric-card">
-        <div class="metric-title">Total Komentar</div>
+        <div class="metric-title">Total Komentar/Data</div>
         <div class="metric-val">{total_comms:,}</div>
     </div>
     """, unsafe_allow_html=True)
@@ -276,7 +280,7 @@ with st.expander("🔍 Filter & Eksplorasi Data", expanded=False):
             default=all_topics
         )
     with f_col3:
-        search_kw = st.text_input("Cari Kata Kunci Komentar:", placeholder="misal: bkk, jalan, sekolah...")
+        search_kw = st.text_input("Cari Kata Kunci:", placeholder="misal: bkk, jalan, sekolah, nama warga...")
 
 # Aplikasikan Filter
 filtered_df = df[
@@ -285,11 +289,11 @@ filtered_df = df[
 ]
 if search_kw.strip():
     kw = search_kw.strip().lower()
-    filtered_df = filtered_df[
-        filtered_df['comment_text'].fillna('').str.lower().str.contains(kw) |
-        filtered_df['key_point'].fillna('').str.lower().str.contains(kw) |
-        filtered_df['username'].fillna('').str.lower().str.contains(kw)
-    ]
+    search_mask = pd.Series(False, index=filtered_df.index)
+    for col_k in ['comment_text', 'description', 'post_text', 'key_point', 'profile_name', 'username', 'author_name']:
+        if col_k in filtered_df.columns:
+            search_mask = search_mask | filtered_df[col_k].fillna('').astype(str).str.lower().str.contains(kw)
+    filtered_df = filtered_df[search_mask]
 
 # ==========================================
 # 7. GRAFIK & VISUALISASI DATA (PLOTLY)
@@ -320,14 +324,14 @@ with g_row1_col1:
 with g_row1_col2:
     st.subheader("Topik & Isu Hangat yang Paling Dibicarakan")
     topic_counts = filtered_df['topic'].value_counts().head(8).reset_index()
-    topic_counts.columns = ['Topik', 'Jumlah Komentar']
+    topic_counts.columns = ['Topik', 'Jumlah Data']
     
     fig_bar = px.bar(
         topic_counts,
-        x='Jumlah Komentar',
+        x='Jumlah Data',
         y='Topik',
         orientation='h',
-        color='Jumlah Komentar',
+        color='Jumlah Data',
         color_continuous_scale='Blues'
     )
     fig_bar.update_layout(
@@ -341,7 +345,6 @@ with g_row1_col2:
 # Baris Grafik 2: Cross Tabulation (Sentimen per Isu)
 st.subheader("Analisis Silang: Sentimen Warga untuk Tiap Isu")
 topic_sent = filtered_df.groupby(['topic', 'sentiment']).size().reset_index(name='count')
-# Urutkan berdasarkan total per topik
 top_order = filtered_df['topic'].value_counts().head(7).index.tolist()
 topic_sent_filtered = topic_sent[topic_sent['topic'].isin(top_order)]
 
@@ -352,7 +355,7 @@ fig_stacked = px.bar(
     color='sentiment',
     color_discrete_map=COLOR_MAP,
     barmode='stack',
-    labels={'topic': 'Kategori Isu', 'count': 'Jumlah Komentar', 'sentiment': 'Sentimen'}
+    labels={'topic': 'Kategori Isu', 'count': 'Jumlah Data', 'sentiment': 'Sentimen'}
 )
 fig_stacked.update_layout(
     margin=dict(t=20, b=20, l=20, r=20),
@@ -364,10 +367,10 @@ st.plotly_chart(fig_stacked, use_container_width=True)
 # ==========================================
 # 8. TABEL EKSPLORASI KOMENTAR & EXPORT
 # ==========================================
-st.subheader("📋 Eksplorasi Detail Komentar")
-st.caption(f"Menampilkan {len(filtered_df):,} dari {len(df):,} komentar sesuai filter.")
+st.subheader("📋 Eksplorasi Detail Data & Komentar")
+st.caption(f"Menampilkan {len(filtered_df):,} dari {len(df):,} baris sesuai filter.")
 
-cols_to_show = ['sentiment', 'topic', 'key_point', 'comment_text', 'likes', 'username', 'comment_date']
+cols_to_show = ['sentiment', 'topic', 'key_point', 'comment_text', 'description', 'likes', 'shares', 'plays', 'profile_name', 'username', 'platform', 'comment_date', 'post_date', 'video_url']
 available_cols = [c for c in cols_to_show if c in filtered_df.columns]
 
 # Format styling badge sentimen

@@ -295,6 +295,46 @@ def is_valid_comment_text(text):
     return True
 
 
+def is_outdated_post(date_str, min_year=2025):
+    """
+    Mengecek apakah tanggal postingan lebih tua dari min_year (contoh: 2024, 2023, 2022).
+    - Jika memuat tahun eksplisit (misal '15 Agustus 2024') dan tahun < min_year -> True (Outdated).
+    - Jika memuat durasi tahun relatif (misal '2 thn lalu', '3 tahun lalu', '2 yrs ago') -> dihitung berdasarkan tahun berjalan.
+    - Jika tanggal relatif baru ('2 jam lalu', 'Kemarin', '3 hari yang lalu') -> False (Terkini).
+    - Jika tahun >= min_year ('2025', '2026') -> False (Terkini).
+    """
+    if not date_str:
+        return False
+    d = str(date_str).strip()
+    
+    # 1. Cek tahun 4 digit eksplisit (1990 - 2099)
+    years = re.findall(r'\b(19\d{2}|20\d{2})\b', d)
+    if years:
+        for y_str in years:
+            try:
+                y = int(y_str)
+                if 1990 <= y < min_year:
+                    return True
+                elif y >= min_year:
+                    return False
+            except Exception:
+                pass
+
+    # 2. Cek format relatif dalam hitungan tahun (contoh: "2 thn lalu", "3 tahun yang lalu", "2 yrs ago")
+    rel_match = re.search(r'(\d+)\s*(?:thn|th|tahun|yr|yrs|year|years)\b', d, re.IGNORECASE)
+    if rel_match:
+        try:
+            n_years = int(rel_match.group(1))
+            current_year = datetime.now().year
+            est_year = current_year - n_years
+            if est_year < min_year:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
 def extract_comments_from_json_tree(obj, results=None, parent_author=None, is_reply=False):
     """
     Mengekstrak komentar dan deep replies dari struktur pohon GraphQL secara rekursif.
@@ -458,13 +498,46 @@ def load_groups(filepath="groups.txt"):
     return groups
 
 
+def extract_hashtags(text):
+    if not text:
+        return ""
+    tags = re.findall(r'#[\w\u0590-\u05ff]+', str(text))
+    return ", ".join(tags) if tags else ""
+
+
+def detect_language(text):
+    if not text:
+        return "id"
+    t = str(text).lower()
+    jv_words = ['sing', 'nang', 'ning', 'kagem', 'panjenengan', 'lur', 'monggo', 'matur', 'nuwun', 'piye', 'niki', 'punika', 'mawon', 'mboten', 'sampun', 'menika', 'lho', 'wes', 'wis', 'nggih', 'nggon', 'rembug', 'isih', 'yoiki', 'karo', 'ora', 'iki', 'bocah', 'apik']
+    en_words = ['the', 'and', 'this', 'that', 'with', 'from', 'have', 'for', 'you', 'video', 'watch', 'today', 'welcome', 'great', 'about', 'people', 'city', 'best']
+    id_words = ['dan', 'yang', 'di', 'ini', 'itu', 'untuk', 'saya', 'dengan', 'ada', 'bisa', 'dari', 'tidak', 'sudah', 'akan', 'kami', 'mereka', 'kita', 'ke', 'pada', 'adalah']
+    
+    tokens = re.findall(r'\b\w+\b', t)
+    if not tokens:
+        return "id"
+    
+    jv_cnt = sum(1 for w in tokens if w in jv_words)
+    en_cnt = sum(1 for w in tokens if w in en_words)
+    id_cnt = sum(1 for w in tokens if w in id_words)
+    
+    if jv_cnt > 0 and jv_cnt >= en_cnt and jv_cnt >= id_cnt:
+        return "jv"
+    if en_cnt > id_cnt and en_cnt > jv_cnt:
+        return "en"
+    return "id"
+
+
 def init_posts_csv(filename):
     if not os.path.isfile(filename):
         with open(filename, mode='w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
-                'search_keyword', 'post_id', 'post_date', 'author_name',
-                'post_text', 'reactions_count', 'comments_count', 'shares_count', 'post_url'
+                'platform', 'search_keyword', 'post_id', 'post_date', 'profile_name',
+                'profile_url', 'bio', 'followers_count', 'following_count', 'followers_list',
+                'following_list', 'description', 'likes', 'shares', 'plays',
+                'comments_count', 'video_subtitles', 'text_language', 'hashtags_used',
+                'is_ad', 'is_pinned', 'is_sponsored', 'location_of_creation', 'music_meta', 'video_url'
             ])
 
 
@@ -473,8 +546,9 @@ def init_comments_csv(filename):
         with open(filename, mode='w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
-                'post_id', 'search_keyword', 'comment_id', 'comment_date',
-                'author_name', 'comment_text', 'likes', 'reply_count', 'is_reply', 'reply_to', 'post_url'
+                'platform', 'search_keyword', 'post_id', 'comment_id', 'comment_date',
+                'profile_name', 'username', 'profile_url', 'comment_text', 'likes',
+                'reply_count', 'is_reply', 'reply_to', 'video_url'
             ])
 
 
@@ -484,27 +558,98 @@ def save_to_csv(filename, data_row):
         writer.writerow(data_row)
 
 
-def perform_feed_scroll(driver, distance=650):
+def load_all_existing_sheet_data(current_post_csv, current_comment_csv):
     """
-    Scroll feed dengan fisika humanized acak untuk mencegah flag anti-bot.
+    Memuat seluruh signature postingan, ID postingan, URL postingan, dan teks komentar
+    dari seluruh sheet / file CSV (di folder results/ dan root) agar data yang sudah
+    pernah diambil langsung di-SKIP tanpa diproses ulang.
     """
-    steps = random.randint(3, 6)
-    step_dist = distance / steps
-    for _ in range(steps):
+    seen_post_signatures = set()
+    seen_post_ids = set()
+    seen_post_urls = set()
+    seen_comment_keys = set()
+
+    files_to_check = set()
+    if os.path.exists(current_post_csv):
+        files_to_check.add(os.path.abspath(current_post_csv))
+    if os.path.exists(current_comment_csv):
+        files_to_check.add(os.path.abspath(current_comment_csv))
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Scan folder results/
+    if os.path.exists(RESULTS_DIR):
+        for f in os.listdir(RESULTS_DIR):
+            if f.endswith(".csv"):
+                files_to_check.add(os.path.join(RESULTS_DIR, f))
+
+    # Scan root directory for relevant CSV files
+    for f in os.listdir(base_dir):
+        if f.endswith(".csv") and ("post" in f.lower() or "comment" in f.lower() or "fb" in f.lower() or "isu" in f.lower() or "uji" in f.lower() or "tes" in f.lower()):
+            files_to_check.add(os.path.join(base_dir, f))
+
+    for fpath in files_to_check:
         try:
-            ActionChains(driver).scroll_by_amount(0, int(step_dist)).perform()
+            with open(fpath, mode='r', encoding='utf-8', errors='replace') as f:
+                reader = csv.DictReader(f)
+                if not reader.fieldnames:
+                    continue
+                fieldnames = [fn.lower().strip() for fn in reader.fieldnames]
+                
+                is_post_file = any('post_text' in fn or 'description' in fn or 'reactions_count' in fn for fn in fieldnames)
+                is_comment_file = any('comment_text' in fn or 'reply_to' in fn for fn in fieldnames)
+
+                for row in reader:
+                    row_lower = {k.lower().strip(): v for k, v in row.items() if k and v}
+                    
+                    # Track post
+                    if is_post_file or 'post_text' in row_lower or 'description' in row_lower:
+                        auth = (row_lower.get('profile_name') or row_lower.get('author_name') or row_lower.get('author') or '').strip()
+                        txt = (row_lower.get('description') or row_lower.get('post_text') or '').strip()
+                        pid = (row_lower.get('post_id') or row_lower.get('video_id') or '').strip()
+                        purl = (row_lower.get('video_url') or row_lower.get('post_url') or '').strip()
+
+                        if auth or txt:
+                            seen_post_signatures.add(f"{auth}:::{txt[:45]}")
+                        if pid and pid not in ['post_id', 'video_id']:
+                            seen_post_ids.add(pid)
+                        if purl:
+                            clean_u = purl.split('?')[0].rstrip('/')
+                            seen_post_urls.add(clean_u)
+
+                    # Track comment
+                    if is_comment_file or 'comment_text' in row_lower:
+                        cid = (row_lower.get('comment_id') or '').strip()
+                        c_txt = (row_lower.get('comment_text') or '').strip()
+                        c_auth = (row_lower.get('profile_name') or row_lower.get('author_name') or row_lower.get('author') or '').strip()
+                        if cid and cid not in ['comment_id']:
+                            seen_comment_keys.add(cid)
+                        if c_txt:
+                            seen_comment_keys.add(f"{c_auth}:::{c_txt[:50]}")
         except Exception:
             pass
-        try:
-            driver.execute_script("""
-                const dist = arguments[0];
-                window.scrollBy(0, dist);
-                if (document.documentElement) document.documentElement.scrollTop += dist;
-                if (document.body) document.body.scrollTop += dist;
-            """, step_dist)
-        except Exception:
-            pass
-        time.sleep(random.uniform(0.04, 0.12))
+
+    return seen_post_signatures, seen_post_ids, seen_post_urls, seen_comment_keys
+
+
+def perform_feed_scroll(driver, distance=750):
+    """
+    Scroll feed dengan ritme responsif dan cepat untuk memuat postingan baru.
+    """
+    try:
+        ActionChains(driver).scroll_by_amount(0, int(distance)).perform()
+    except Exception:
+        pass
+    try:
+        driver.execute_script("""
+            const dist = arguments[0];
+            window.scrollBy(0, dist);
+            if (document.documentElement) document.documentElement.scrollTop += dist;
+            if (document.body) document.body.scrollTop += dist;
+        """, distance)
+    except Exception:
+        pass
+    time.sleep(random.uniform(0.01, 0.02))
 
 
 def scroll_comment_container_center(driver, distance=550):
@@ -617,105 +762,165 @@ def setup_facebook_session():
 def extract_comments_from_active_container(driver):
     """
     Mengekstrak komentar dan deep replies dari XHR GraphQL interceptor dan DOM dialog yang aktif.
+    Mendukung resolusi SVG <use xlink:href="#Svg..."> untuk author dan teks komentar.
     """
     # 1. Dari XHR/GraphQL Network (Termasuk child replies yang ter-intercept)
     net_comments = []
-    captured_data = driver.execute_script("var d = window._scraped_data; window._scraped_data = []; return d;")
-    if captured_data:
-        for item in captured_data:
-            payload = item.get('payload', {})
-            raw_text = payload.get('text', '')
-            if raw_text:
-                chunks = parse_facebook_raw_response(raw_text)
-                for chunk in chunks:
-                    c_list = extract_comments_from_json_tree(chunk)
-                    if c_list:
-                        net_comments.extend(c_list)
+    try:
+        captured_data = driver.execute_script("var d = window._scraped_data; window._scraped_data = []; return d;")
+        if captured_data:
+            for item in captured_data:
+                payload = item.get('payload', {})
+                raw_text = payload.get('text', '')
+                if raw_text:
+                    chunks = parse_facebook_raw_response(raw_text)
+                    for chunk in chunks:
+                        c_list = extract_comments_from_json_tree(chunk)
+                        if c_list:
+                            net_comments.extend(c_list)
+    except Exception:
+        pass
 
-    # 2. Dari DOM dialog tengah (Mendeteksi struktur reply berjenjang)
-    dom_comments = driver.execute_script("""
-        let results = [];
-        let scope = document.querySelector('div[role="dialog"]') || document;
-        
-        let commentElements = scope.querySelectorAll(
-            'div[role="article"], div[aria-label*="Komentar oleh"], div[aria-label*="Comment by"], div[aria-label*="Komentar"], div[aria-label*="Comment"], div[class*="x1y1aw1k"], ul > li'
-        );
-
-        commentElements.forEach((el, idx) => {
-            if (el.closest('[role="navigation"]') || el.closest('[aria-label*="Notifikasi"]')) return;
-
-            let authorEl = el.querySelector('a span[dir="auto"], a strong, span > strong, strong');
-            let author = authorEl ? authorEl.innerText.trim().split('\\n')[0] : 'Warga';
-
-            let textEl = el.querySelector('div[dir="auto"][lang], div[dir="auto"]');
-            let commentText = textEl ? textEl.innerText.trim() : '';
-
-            if (commentText === author) {
-                let altTextEls = el.querySelectorAll('div[dir="auto"]');
-                if (altTextEls.length > 1) {
-                    commentText = altTextEls[1].innerText.trim();
-                }
-            }
-
-            let timeEl = el.querySelector('abbr, a[aria-label*="lalu"], a[aria-label*="ago"], span[id*="timestamp"]');
-            let commentDate = timeEl ? (timeEl.getAttribute('aria-label') || timeEl.innerText || 'Terkini') : 'Terkini';
-
-            // Ekstraksi Likes
-            let likes = 0;
-            let likeEl = el.querySelector('span[aria-label*="reaksi"], span[aria-label*="like"]');
-            if (likeEl) {
-                let lTxt = (likeEl.getAttribute('aria-label') || likeEl.innerText || '').replace(/[^0-9]/g, '');
-                if (lTxt) likes = parseInt(lTxt);
-            }
-
-            // Ekstraksi Reply Count pada komentar ini
-            let replyCount = 0;
-            let allSpans = el.querySelectorAll('span, div[role="button"]');
-            for (let s of allSpans) {
-                let st = (s.innerText || '').trim();
-                let match = st.match(/(\\d+)\\s*(?:balasan|repl)/i);
-                if (match && match[1]) {
-                    replyCount = parseInt(match[1]);
-                    break;
-                }
-            }
-
-            // Deteksi apakah komentar ini merupakan balasan (child reply)
-            let isReply = false;
-            let replyTo = '';
+    # 2. Dari DOM dialog tengah (Mendeteksi struktur reply berjenjang & SVG obfuscation)
+    dom_comments = []
+    try:
+        dom_comments = driver.execute_script("""
+            let results = [];
+            let scope = document.querySelector('div[role="dialog"]') || document;
             
-            // Cek apakah bersarang di dalam article/list lain
-            let parentArticle = el.parentElement ? el.parentElement.closest('div[role="article"], ul > li') : null;
-            if (parentArticle && parentArticle !== el) {
-                isReply = true;
-                let pAuth = parentArticle.querySelector('a span[dir="auto"], strong');
-                if (pAuth) replyTo = pAuth.innerText.trim().split('\\n')[0];
-            } else if (el.closest('ul ul') || el.getAttribute('aria-level') === '2' || commentText.startsWith('@')) {
-                isReply = true;
-                if (commentText.startsWith('@')) {
-                    let m = commentText.match(/^@([^\\s,:]+)/);
-                    if (m && m[1]) replyTo = m[1];
+            // Helper untuk ekstrak teks dari elemen yang memuat SVG <use xlink:href="#Svg...">
+            function resolveText(el) {
+                if (!el) return '';
+                let res = '';
+                
+                let aria = el.getAttribute('aria-label');
+                if (aria) res += aria + ' ';
+                
+                let labelledBy = el.getAttribute('aria-labelledby');
+                if (labelledBy) {
+                    let ids = labelledBy.split(/\\s+/);
+                    for (let id of ids) {
+                        let target = document.getElementById(id);
+                        if (target) {
+                            res += (target.textContent || target.innerText || '') + ' ';
+                        }
+                    }
                 }
+
+                let uses = el.querySelectorAll('use');
+                for (let u of uses) {
+                    let href = u.getAttribute('xlink:href') || u.getAttribute('href') || '';
+                    if (href.startsWith('#')) {
+                        let ref = document.getElementById(href.substring(1));
+                        if (ref) res += (ref.textContent || ref.innerText || '') + ' ';
+                    }
+                }
+                
+                let svgTexts = el.querySelectorAll('svg text, svg tspan');
+                for (let st of svgTexts) {
+                    res += (st.textContent || st.innerText || '') + ' ';
+                }
+
+                res += (el.innerText || el.textContent || '') + ' ';
+                return res.replace(/\\s+/g, ' ').trim();
             }
 
-            if (commentText && commentText.length > 1 && commentText !== author) {
-                results.push({
-                    comment_id: 'fb_dom_' + idx + '_' + Math.floor(Math.random() * 10000),
-                    author: author,
-                    comment_date: commentDate,
-                    comment_text: commentText,
-                    likes: likes,
-                    reply_count: replyCount,
-                    is_reply: isReply ? 'YA' : 'TIDAK',
-                    reply_to: replyTo
-                });
-            }
-        });
-        return results;
-    """)
+            let commentElements = scope.querySelectorAll(
+                'div[role="article"], div[aria-label*="Komentar oleh"], div[aria-label*="Comment by"], div[aria-label*="Komentar"], div[aria-label*="Comment"], div[class*="x1y1aw1k"], ul > li'
+            );
+
+            commentElements.forEach((el, idx) => {
+                if (el.closest('[role="navigation"]') || el.closest('[aria-label*="Notifikasi"]')) return;
+
+                let authorEl = el.querySelector('a span[dir="auto"], a strong, span > strong, strong, a[role="link"]');
+                let author = authorEl ? resolveText(authorEl).split('\\n')[0].trim() : 'Warga';
+                if (!author || author.toLowerCase().startsWith('hasil untuk') || author === 'Komentar') author = 'Warga';
+
+                let authorLink = authorEl ? (authorEl.closest('a') ? authorEl.closest('a').href : (authorEl.tagName === 'A' ? authorEl.href : '')) : '';
+                let cleanAuthorUrl = authorLink ? authorLink.split('?')[0].split('&')[0] : '';
+                let uname = author;
+                if (cleanAuthorUrl) {
+                    let mU = cleanAuthorUrl.match(/facebook\\.com\\/([^/?#]+)/);
+                    if (mU && mU[1] && mU[1] !== 'profile.php' && mU[1] !== 'people') uname = mU[1];
+                }
+
+                let textEl = el.querySelector('div[dir="auto"][lang], div[dir="auto"][style*="text-align"], div[dir="auto"], span[dir="auto"]');
+                let commentText = textEl ? resolveText(textEl) : '';
+
+                // Jika commentText sama dengan author (karena memilih author wrapper), cari text node berikutnya
+                if (commentText === author || commentText.length < 2) {
+                    let altTextEls = el.querySelectorAll('div[dir="auto"], span[dir="auto"]');
+                    for (let alt of altTextEls) {
+                        let aTxt = resolveText(alt);
+                        if (aTxt && aTxt !== author && !['suka', 'balas', 'bagikan', 'like', 'reply', 'share', 'terkini'].includes(aTxt.toLowerCase()) && aTxt.length > 1) {
+                            commentText = aTxt;
+                            break;
+                        }
+                    }
+                }
+
+                let timeEl = el.querySelector('abbr, a[aria-label*="lalu"], a[aria-label*="ago"], span[id*="timestamp"], a[role="link"] span');
+                let commentDate = timeEl ? (resolveText(timeEl) || timeEl.getAttribute('aria-label') || 'Terkini') : 'Terkini';
+
+                // Ekstraksi Likes
+                let likes = 0;
+                let likeEl = el.querySelector('span[aria-label*="reaksi"], span[aria-label*="like"], span[aria-label*="suka"]');
+                if (likeEl) {
+                    let lTxt = (likeEl.getAttribute('aria-label') || likeEl.innerText || '').replace(/[^0-9]/g, '');
+                    if (lTxt) likes = parseInt(lTxt);
+                }
+
+                // Ekstraksi Reply Count pada komentar ini
+                let replyCount = 0;
+                let allSpans = el.querySelectorAll('span, div[role="button"]');
+                for (let s of allSpans) {
+                    let st = (s.innerText || '').trim();
+                    let match = st.match(/(\\d+)\\s*(?:balasan|repl)/i);
+                    if (match && match[1]) {
+                        replyCount = parseInt(match[1]);
+                        break;
+                    }
+                }
+
+                // Deteksi apakah komentar ini merupakan balasan (child reply)
+                let isReply = false;
+                let replyTo = '';
+                
+                let parentArticle = el.parentElement ? el.parentElement.closest('div[role="article"], ul > li') : null;
+                if (parentArticle && parentArticle !== el) {
+                    isReply = true;
+                    let pAuth = parentArticle.querySelector('a span[dir="auto"], strong, a[role="link"]');
+                    if (pAuth) replyTo = resolveText(pAuth).split('\\n')[0].trim();
+                } else if (el.closest('ul ul') || el.getAttribute('aria-level') === '2' || commentText.startsWith('@')) {
+                    isReply = true;
+                    if (commentText.startsWith('@')) {
+                        let m = commentText.match(/^@([^\\s,:]+)/);
+                        if (m && m[1]) replyTo = m[1];
+                    }
+                }
+
+                if (commentText && commentText.length > 1 && commentText !== author) {
+                    results.push({
+                        comment_id: 'fb_dom_' + idx + '_' + Math.floor(Math.random() * 10000),
+                        author: author,
+                        username: uname,
+                        profile_url: cleanAuthorUrl,
+                        comment_date: commentDate,
+                        comment_text: commentText,
+                        likes: likes,
+                        reply_count: replyCount,
+                        is_reply: isReply ? 'YA' : 'TIDAK',
+                        reply_to: replyTo
+                    });
+                }
+            });
+            return results;
+        """)
+    except Exception:
+        pass
 
     combined = []
-    for c in net_comments + (dom_comments or []):
+    for c in (net_comments or []) + (dom_comments or []):
         c_txt = c.get('comment_text', '')
         if is_valid_comment_text(c_txt):
             combined.append(c)
@@ -743,7 +948,7 @@ def switch_filter_to_all_comments(driver):
                 }
             }
         """)
-        time.sleep(random.uniform(1.1, 1.6))
+        pause_ctrl.sleep(random.uniform(0.15, 0.3))
 
         # Klik menu 'Semua komentar'
         driver.execute_script("""
@@ -756,7 +961,7 @@ def switch_filter_to_all_comments(driver):
                 }
             }
         """)
-        time.sleep(random.uniform(1.3, 1.8))
+        pause_ctrl.sleep(random.uniform(0.2, 0.35))
     except Exception:
         pass
 
@@ -797,19 +1002,22 @@ def unfold_all_reply_threads(driver):
         return 0
 
 
-def exhaustively_scroll_and_extract_comments(driver, max_idle_scrolls=4, max_total_comments_limit=500):
+def exhaustively_scroll_and_extract_comments(driver, max_idle_scrolls=3, max_total_comments_limit=150, seen_comment_keys=None):
     """
     LANGKAH 4: Scroll kontainer komentar sampai HABIS dan membongkar semua deep replies:
     - Otomatis membuka semua thread balasan (Lihat balasan, Lihat balasan lainnya, View replies)
-    - Melakukan scroll pada kontainer tengah dengan anti-bot wheel jitter
-    - Mengumpulkan komentar utama dan balasan secara komprehensif
+    - Melakukan scroll pada kontainer tengah dengan ritme cepat & responsif
+    - Mengumpulkan komentar utama dan balasan, serta melewatkan yang sudah ada di sheet
     - Selesai jika tidak ada komentar/balasan baru setelah beberapa putaran.
     """
+    if seen_comment_keys is None:
+        seen_comment_keys = set()
+
     seen_in_this_post = set()
     collected_for_post = []
     consecutive_no_new = 0
     total_scrolls = 0
-    max_scroll_limit = 50
+    max_scroll_limit = 120 if max_total_comments_limit == 0 else max(10, (max_total_comments_limit // 8) + 10)
 
     while consecutive_no_new < max_idle_scrolls and total_scrolls < max_scroll_limit:
         if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
@@ -820,7 +1028,7 @@ def exhaustively_scroll_and_extract_comments(driver, max_idle_scrolls=4, max_tot
         # 1. Unfold semua thread balasan (deep replies) yang muncul di layar
         unfolded_replies = unfold_all_reply_threads(driver)
         if unfolded_replies > 0:
-            pause_ctrl.sleep(random.uniform(1.2, 1.8))
+            pause_ctrl.sleep(random.uniform(0.35, 0.55))
 
         # 2. Klik tombol 'Lihat komentar lainnya' / 'View more comments' utama
         clicked_expand = driver.execute_script("""
@@ -843,9 +1051,9 @@ def exhaustively_scroll_and_extract_comments(driver, max_idle_scrolls=4, max_tot
             return wasClicked;
         """)
 
-        # 3. Scroll kontainer tengah dialog komentar dengan humanized jitter
-        scroll_comment_container_center(driver, distance=random.randint(500, 650))
-        pause_ctrl.sleep(random.uniform(1.6, 2.5))
+        # 3. Scroll kontainer tengah dialog komentar dengan cepat
+        scroll_comment_container_center(driver, distance=random.randint(550, 700))
+        pause_ctrl.sleep(random.uniform(0.5, 0.8))
 
         # 4. Ekstrak komentar & balasan yang baru masuk
         extracted = extract_comments_from_active_container(driver)
@@ -853,30 +1061,39 @@ def exhaustively_scroll_and_extract_comments(driver, max_idle_scrolls=4, max_tot
 
         for c in extracted:
             c_txt = c.get('comment_text', '').strip()
-            if c_txt and c_txt not in seen_in_this_post:
-                seen_in_this_post.add(c_txt)
-                collected_for_post.append(c)
-                new_found_this_step += 1
-                c_author = c.get('author', 'Warga')
-                c_date = c.get('comment_date', 'Terkini')
-                c_likes = c.get('likes', 0)
-                is_rep = c.get('is_reply', 'TIDAK')
-                rep_to = c.get('reply_to', '')
-                rep_cnt = c.get('reply_count', 0)
+            c_id = c.get('comment_id', '')
+            c_author = c.get('author', 'Warga')
+            c_key = f"{c_author}:::{c_txt[:50]}"
 
-                if is_rep == 'YA':
-                    target_str = f" [Balasan ke @{rep_to}]" if rep_to else " [Balasan]"
-                    print(f"      └──{target_str} @{c_author}: \"{c_txt[:50]}...\" (likes: {c_likes})")
-                else:
-                    rep_info = f" (balasan: {rep_cnt})" if rep_cnt > 0 else ""
-                    print(f"    + [{c_date}] @{c_author}: \"{c_txt[:55]}...\" (likes: {c_likes}{rep_info})")
+            # Cek jika komentar sudah ada di sheet sebelumnya atau postingan ini
+            if not c_txt or c_txt in seen_in_this_post or c_id in seen_comment_keys or c_key in seen_comment_keys:
+                continue
+
+            seen_in_this_post.add(c_txt)
+            seen_comment_keys.add(c_id)
+            seen_comment_keys.add(c_key)
+            collected_for_post.append(c)
+            new_found_this_step += 1
+
+            c_date = c.get('comment_date', 'Terkini')
+            c_likes = c.get('likes', 0)
+            is_rep = c.get('is_reply', 'TIDAK')
+            rep_to = c.get('reply_to', '')
+            rep_cnt = c.get('reply_count', 0)
+
+            if is_rep == 'YA':
+                target_str = f" [Balasan ke @{rep_to}]" if rep_to else " [Balasan]"
+                print(f"      └──{target_str} @{c_author}: \"{c_txt[:50]}...\" (likes: {c_likes})")
+            else:
+                rep_info = f" (balasan: {rep_cnt})" if rep_cnt > 0 else ""
+                print(f"    + [{c_date}] @{c_author}: \"{c_txt[:55]}...\" (likes: {c_likes}{rep_info})")
 
         if new_found_this_step > 0 or clicked_expand or unfolded_replies > 0:
             consecutive_no_new = 0
         else:
             consecutive_no_new += 1
 
-        if len(collected_for_post) >= max_total_comments_limit:
+        if max_total_comments_limit > 0 and len(collected_for_post) >= max_total_comments_limit:
             break
 
     return collected_for_post
@@ -926,7 +1143,7 @@ def close_post_dialog(driver, search_url=None):
                 }
             }
         """)
-        time.sleep(0.5)
+        time.sleep(0.15)
     except Exception:
         pass
 
@@ -934,7 +1151,7 @@ def close_post_dialog(driver, search_url=None):
         has_dialog = driver.execute_script("return !!document.querySelector('div[role=\"dialog\"]');")
         if has_dialog:
             ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-            time.sleep(0.5)
+            time.sleep(0.15)
     except Exception:
         pass
 
@@ -950,13 +1167,12 @@ def close_post_dialog(driver, search_url=None):
             print("  [*] Mengembalikan navigasi dari permalink/beranda ke feed pencarian...")
             try:
                 driver.back()
-                time.sleep(1.8)
+                time.sleep(1.0)
             except Exception:
                 pass
-            # Jika setelah back masih belum kembali ke search, arahkan langsung ke search_url
             if '/permalink/' in driver.current_url or '/photo/' in driver.current_url or driver.current_url.rstrip('/') in ['https://www.facebook.com', 'https://web.facebook.com']:
                 driver.get(search_url)
-                time.sleep(2.5)
+                time.sleep(1.5)
 
 
 def apply_recent_posts_filter(driver, retries=3):
@@ -1069,27 +1285,17 @@ def apply_recent_posts_filter(driver, retries=3):
     return False
 
 
-def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20, max_comments_per_post=150, custom_search_url=None, group_name=None):
+def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20, max_comments_per_post=150, custom_search_url=None, group_name=None, min_year=2025):
     """
-    Workflow 4 Langkah Berurutan (Post per Post):
+    Workflow 4 Langkah Berurutan (Post per Post) dengan Kecepatan Tinggi & Deduplikasi Sheet Otomatis:
     1. Buka Keyword di Facebook Search Feed / Group Search.
     2. Aktifkan Filter 'Postingan Terbaru'.
-    3. Ambil postingan berikutnya di feed -> Klik Toggle Komentar (Bukan Permalink).
-    4. Ubah filter 'Paling Relevan' menjadi 'Semua Komentar'.
-    5. Scroll kontainer komentar & bongkar balasan sampai HABIS -> Simpan CSV -> Tutup Dialog / Kembali ke Search -> Lanjut Post Berikutnya!
+    3. Ambil postingan berikutnya di feed -> Cek Tahun (Skip jika < 2025) -> Cek Sheet (Skip jika sudah ada).
+    4. Klik Toggle Komentar -> Ubah filter menjadi 'Semua Komentar'.
+    5. Scroll kontainer komentar & bongkar balasan sampai HABIS -> Simpan CSV -> Lanjut Post Berikutnya!
     """
-    processed_signatures = set()
-    if os.path.exists(post_csv):
-        try:
-            with open(post_csv, mode='r', encoding='utf-8', errors='replace') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    auth = row.get('author_name', '')
-                    txt = (row.get('post_text', '') or '')[:45]
-                    if auth or txt:
-                        processed_signatures.add(f"{auth}:::{txt}")
-        except Exception:
-            pass
+    # Memuat seluruh database postingan & komentar yang sudah pernah tersimpan di seluruh sheet/CSV
+    seen_signatures, seen_post_ids, seen_post_urls, seen_comment_keys = load_all_existing_sheet_data(post_csv, comment_csv)
 
     total_posts_saved = 0
     total_comments_saved = 0
@@ -1097,10 +1303,15 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
     search_url = custom_search_url or f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(keyword)}&filters={FB_CHRONOSORT_FILTER}"
 
     title_info = f"Grup '{group_name}' | Kata Kunci: '{keyword}'" if group_name else f"Kata Kunci: '{keyword}'"
+    max_label = f"{max_posts} Postingan" if max_posts > 0 else "Tanpa Batas (Ambil Semua)"
+    com_label = f"{max_comments_per_post} Komentar / Post" if max_comments_per_post > 0 else "Tanpa Batas (Ambil Semua)"
     print(f"\n" + "=" * 65)
     print(f"[*] LANGKAH 1: Memproses {title_info}")
-    if processed_signatures:
-        print(f"[*] [RESUME AKTIF] Sesi sebelumnya terdeteksi: {len(processed_signatures)} postingan sudah pernah disimpan.")
+    print(f"[*] Target Batas Postingan   : {max_label}")
+    print(f"[*] Target Batas Komentar    : {com_label}")
+    print(f"[*] Filter Periode Postingan : Minimal Tahun {min_year} ke atas (Postingan <= {min_year-1} dilewati otomatis)")
+    if seen_signatures or seen_post_ids:
+        print(f"[*] [DEDUPLIKASI SHEET AKTIF] Terdeteksi {len(seen_signatures)} postingan & {len(seen_comment_keys)} komentar sudah ada di sheet (akan otomatis di-SKIP).")
     print(f"[*] Lokasi Penyimpanan Hasil:")
     print(f"    - Postingan: {post_csv}")
     print(f"    - Komentar : {comment_csv}")
@@ -1109,7 +1320,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
     # Coba aktifkan filter 'Postingan Terbaru' jika tombol tersedia
     apply_recent_posts_filter(driver)
 
-    while total_posts_saved < max_posts and empty_scrolls < 8:
+    while (max_posts == 0 or total_posts_saved < max_posts) and empty_scrolls < 8:
         if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
             break
 
@@ -1118,7 +1329,9 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
 
         # Cari postingan berikutnya yang belum diproses dari feed
         next_post = driver.execute_script("""
-            let seenList = arguments[0];
+            let seenSignatures = arguments[0];
+            let seenPostIds = arguments[1];
+            let seenPostUrls = arguments[2];
             let feedNodes = document.querySelectorAll('div[role="feed"] > div, div[role="article"], div[data-ad-preview="message"], div[class*="x1yztbdb"]');
 
             for (let idx = 0; idx < feedNodes.length; idx++) {
@@ -1127,20 +1340,66 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                 let postText = textEl ? (textEl.innerText || '').trim() : '';
 
                 if (postText.length > 8 && !postText.toLowerCase().startsWith('hasil untuk') && !postText.toLowerCase().startsWith('menampilkan hasil')) {
-                    let author = 'Warga / Anonim';
-                    let authorEl = p.querySelector('h2 strong, h3 strong, h4 strong, a strong, strong span, h2 a, h3 a, a[role="link"] span');
-                    if (authorEl && authorEl.innerText) {
-                        author = authorEl.innerText.trim().split('\\n')[0];
+                    // Helper untuk membaca teks asli dari elemen HTML, termasuk SVG <use xlink:href="#Svg...">
+                    function resolveElementTextWithSvg(element) {
+                        if (!element) return '';
+                        let result = '';
+                        
+                        let aria = element.getAttribute('aria-label');
+                        if (aria) result += aria + ' ';
+                        
+                        let labelledBy = element.getAttribute('aria-labelledby');
+                        if (labelledBy) {
+                            let ids = labelledBy.split(/\\s+/);
+                            for (let id of ids) {
+                                let target = document.getElementById(id);
+                                if (target) {
+                                    result += (target.textContent || target.innerText || '') + ' ';
+                                    let subUses = target.querySelectorAll('use');
+                                    for (let u of subUses) {
+                                        let href = u.getAttribute('xlink:href') || u.getAttribute('href') || '';
+                                        if (href.startsWith('#')) {
+                                            let ref = document.getElementById(href.substring(1));
+                                            if (ref) result += (ref.textContent || ref.innerText || '') + ' ';
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let useNodes = element.querySelectorAll('use');
+                        for (let u of useNodes) {
+                            let href = u.getAttribute('xlink:href') || u.getAttribute('href') || '';
+                            if (href.startsWith('#')) {
+                                let ref = document.getElementById(href.substring(1));
+                                if (ref) {
+                                    result += (ref.textContent || ref.innerText || '') + ' ';
+                                }
+                            }
+                        }
+
+                        let svgTexts = element.querySelectorAll('svg text, svg tspan');
+                        for (let st of svgTexts) {
+                            result += (st.textContent || st.innerText || '') + ' ';
+                        }
+
+                        result += (element.innerText || element.textContent || '') + ' ';
+                        return result.replace(/\\s+/g, ' ').trim();
                     }
 
-                    let timeEl = p.querySelector('abbr, a[aria-label*="lalu"], a[aria-label*="ago"], span[id*="timestamp"]');
-                    let postDate = timeEl ? (timeEl.getAttribute('aria-label') || timeEl.innerText || 'Terkini') : 'Terkini';
+                    let author = 'Warga / Anonim';
+                    let authorEl = p.querySelector('h2 strong, h3 strong, h4 strong, a strong, strong span, h2 a, h3 a, a[role="link"] span, h2, h3');
+                    if (authorEl) {
+                        let resolvedAuth = resolveElementTextWithSvg(authorEl);
+                        if (resolvedAuth) {
+                            author = resolvedAuth.split('\\n')[0].trim();
+                        }
+                    }
+
+                    let authorLinkEl = p.querySelector('h2 a[href], h3 a[href], h4 a[href], strong a[href], a[role="link"][tabindex="0"]');
+                    let profileUrl = authorLinkEl ? (authorLinkEl.href || '').split('?')[0] : '';
 
                     let signature = author + ':::' + postText.substring(0, 45);
-
-                    if (seenList.includes(signature)) {
-                        continue;
-                    }
 
                     let postUrl = '';
                     let postId = '';
@@ -1155,14 +1414,225 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                         }
                     }
 
+                    let cleanUrl = postUrl ? postUrl.split('?')[0].replace(/\\/$/, '') : '';
+
+                    // DEDUPLIKASI: Lewati jika postingan ini sudah ada di sheet sebelumnya
+                    if (seenSignatures.includes(signature) || (postId && seenPostIds.includes(postId)) || (cleanUrl && seenPostUrls.includes(cleanUrl))) {
+                        continue;
+                    }
+
+                    // EKSTRAKSI TANGGAL POSTINGAN SECARA PRESISI DARI SVG <use> & ELEMEN KARTU
+                    let postDate = '';
+                    const monthRegex = /\\b(?:januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember|january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|agt|agu|aug|sep|okt|oct|nov|des|dec)\\b/i;
+                    const yearRegex = /\\b(19\\d{2}|20\\d{2})\\b/;
+                    const relTimeRegex = /\\b\\d+\\s*(?:thn|th|tahun|yr|yrs|year|years|mgg|minggu|wk|week|weeks|hr|hari|day|days|jam|jm|hour|hours|mnt|menit|min|mins|lalu|ago)\\b/i;
+
+                    let candidateElements = p.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], a[role="link"], span[dir="auto"], span, div[dir="auto"], abbr, svg');
+                    for (let el of candidateElements) {
+                        let resolved = resolveElementTextWithSvg(el);
+                        if (!resolved) continue;
+
+                        let resLower = resolved.toLowerCase();
+                        if (resLower.includes('komentar') || resLower.includes('reaksi') || resLower.includes('bagikan') || resLower.includes('kirim pesan') || resLower.includes('jawab')) {
+                            continue;
+                        }
+
+                        let isDate = (
+                            yearRegex.test(resolved) ||
+                            (monthRegex.test(resolved) && /\\d/.test(resolved)) ||
+                            relTimeRegex.test(resolved) ||
+                            resLower.includes('kemarin') ||
+                            resLower.includes('yesterday') ||
+                            resLower.includes('pukul') ||
+                            resLower.includes('baru saja') ||
+                            resLower.includes('just now') ||
+                            resLower.includes('lalu') ||
+                            resLower.includes('ago')
+                        );
+
+                        if (isDate) {
+                            postDate = resolved;
+                            if (yearRegex.test(resolved)) break;
+                        }
+                    }
+
+                    // Fallback: periksa seluruh tag <use> di dalam kartu postingan p
+                    if (!postDate) {
+                        let allUsesInCard = p.querySelectorAll('use');
+                        for (let u of allUsesInCard) {
+                            let href = u.getAttribute('xlink:href') || u.getAttribute('href') || '';
+                            if (href.startsWith('#')) {
+                                try {
+                                    let ref = document.getElementById(href.substring(1));
+                                    if (ref) {
+                                        let refTxt = (ref.textContent || ref.innerText || '').trim();
+                                        if (refTxt && (yearRegex.test(refTxt) || relTimeRegex.test(refTxt) || monthRegex.test(refTxt))) {
+                                            postDate = refTxt;
+                                            if (yearRegex.test(refTxt)) break;
+                                        }
+                                    }
+                                } catch(e) {}
+                            }
+                        }
+                    }
+
+                    if (!postDate) {
+                        let fullCardText = p.innerText || '';
+                        let foundYears = fullCardText.match(/\\b(19\\d{2}|20\\d{2})\\b/g);
+                        if (foundYears) {
+                            for (let y of foundYears) {
+                                if (parseInt(y) < 2025) {
+                                    postDate = y;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!postDate) {
+                        postDate = 'Terkini';
+                    }
+
+                    let commentCount = 0;
+                    let reactionCount = 0;
+                    let shareCount = 0;
+                    let playCount = 0;
+                    let hasCommentStats = false;
+
+                    // 1. Ekstraksi Jumlah Komentar
+                    let allSpansAndLinks = p.querySelectorAll('div[role="button"], a, span[dir="auto"], span, div[dir="auto"]');
+                    for (let s of allSpansAndLinks) {
+                        let t = resolveElementTextWithSvg(s).toLowerCase();
+                        let aria = (s.getAttribute('aria-label') || '').toLowerCase();
+                        
+                        let mCom = t.match(/(\\d+(?:[.,]\\d+)?\\s*(?:rb|k|jt|m)?)\\s*(?:komentar|comment|comments|balasan|replies|reply)/i) ||
+                                   aria.match(/(\\d+(?:[.,]\\d+)?\\s*(?:rb|k|jt|m)?)\\s*(?:komentar|comment|comments|balasan|replies|reply)/i);
+                        if (mCom) {
+                            let numStr = mCom[1].replace(/\\s/g, '').replace(',', '.');
+                            if (numStr.endsWith('rb') || numStr.endsWith('k')) {
+                                commentCount = Math.round(parseFloat(numStr) * 1000);
+                            } else if (numStr.endsWith('jt') || numStr.endsWith('m')) {
+                                commentCount = Math.round(parseFloat(numStr) * 1000000);
+                            } else {
+                                commentCount = parseInt(numStr.replace(/[^0-9]/g, '')) || 0;
+                            }
+                            hasCommentStats = true;
+                            break;
+                        }
+                    }
+
+                    if (!hasCommentStats) {
+                        for (let s of allSpansAndLinks) {
+                            let t = (s.innerText || s.textContent || '').trim();
+                            let aria = (s.getAttribute('aria-label') || '').toLowerCase();
+                            let parentTxt = s.parentElement ? (s.parentElement.innerText || s.parentElement.textContent || '').toLowerCase() : '';
+                            let parentAria = s.parentElement ? (s.parentElement.getAttribute('aria-label') || '').toLowerCase() : '';
+
+                            if (/^\\d+(?:[.,]\\d+)?\\s*(?:rb|k|jt|m)?$/i.test(t)) {
+                                let isCom = (
+                                    aria.includes('komentar') || aria.includes('comment') ||
+                                    parentAria.includes('komentar') || parentAria.includes('comment') ||
+                                    parentTxt.includes('komentar') || parentTxt.includes('comment')
+                                );
+                                if (isCom) {
+                                    let numStr = t.replace(/\\s/g, '').replace(',', '.');
+                                    if (numStr.endsWith('rb') || numStr.endsWith('k')) {
+                                        commentCount = Math.round(parseFloat(numStr) * 1000);
+                                    } else if (numStr.endsWith('jt') || numStr.endsWith('m')) {
+                                        commentCount = Math.round(parseFloat(numStr) * 1000000);
+                                    } else {
+                                        commentCount = parseInt(numStr.replace(/[^0-9]/g, '')) || 0;
+                                    }
+                                    hasCommentStats = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. Ekstraksi Reaksi / Suka
+                    for (let s of allSpansAndLinks) {
+                        let aria = (s.getAttribute('aria-label') || '').toLowerCase();
+                        let mReact = aria.match(/(\\d+(?:[.,]\\d+)?\\s*(?:rb|k)?)\\s*(?:reaksi|suka|like|orang menanggapi)/i);
+                        if (mReact) {
+                            let numStr = mReact[1].replace(/\\s/g, '').replace(',', '.');
+                            if (numStr.endsWith('rb') || numStr.endsWith('k')) {
+                                reactionCount = Math.round(parseFloat(numStr) * 1000);
+                            } else {
+                                reactionCount = parseInt(numStr.replace(/[^0-9]/g, '')) || 0;
+                            }
+                            break;
+                        }
+                    }
+
+                    // 3. Ekstraksi Shares & Plays
+                    for (let s of allSpansAndLinks) {
+                        let t = resolveElementTextWithSvg(s).toLowerCase();
+                        let mShare = t.match(/(\\d+(?:[.,]\\d+)?\\s*(?:rb|k)?)\\s*(?:kali dibagikan|dibagikan|shares|share)/i);
+                        if (mShare) {
+                            let numStr = mShare[1].replace(/\\s/g, '').replace(',', '.');
+                            shareCount = numStr.endsWith('rb') || numStr.endsWith('k') ? Math.round(parseFloat(numStr) * 1000) : (parseInt(numStr.replace(/[^0-9]/g, '')) || 0);
+                            break;
+                        }
+                    }
+
+                    for (let s of allSpansAndLinks) {
+                        let t = resolveElementTextWithSvg(s).toLowerCase();
+                        let mPlay = t.match(/(\\d+(?:[.,]\\d+)?\\s*(?:rb|k|jt|m)?)\\s*(?:tayangan|views|view|x ditonton)/i);
+                        if (mPlay) {
+                            let numStr = mPlay[1].replace(/\\s/g, '').replace(',', '.');
+                            if (numStr.endsWith('rb') || numStr.endsWith('k')) playCount = Math.round(parseFloat(numStr) * 1000);
+                            else if (numStr.endsWith('jt') || numStr.endsWith('m')) playCount = Math.round(parseFloat(numStr) * 1000000);
+                            else playCount = parseInt(numStr.replace(/[^0-9]/g, '')) || 0;
+                            break;
+                        }
+                    }
+
+                    let cardFullText = p.innerText || '';
+                    let isAd = (
+                        cardFullText.includes('Bersponsor') || cardFullText.includes('Sponsored') ||
+                        p.querySelector('[data-ad-preview], [data-ad-comet-preview]') !== null
+                    ) ? 'Yes' : 'No';
+                    let isSponsored = (
+                        cardFullText.includes('Kemitraan berbayar') || cardFullText.includes('Paid partnership') ||
+                        cardFullText.includes('Bersponsor') || cardFullText.includes('Sponsored')
+                    ) ? 'Yes' : 'No';
+                    let isPinned = (
+                        cardFullText.includes('Disematkan') || cardFullText.includes('Pinned post') ||
+                        p.querySelector('svg[aria-label*="semat" i], svg[aria-label*="pin" i]') !== null
+                    ) ? 'Yes' : 'No';
+
+                    let locationStr = '';
+                    let locMatch = cardFullText.match(/(?:—|\\-|\\bat\\b|\\bdi\\b)\\s+([A-Z][a-zA-Z0-9\\s,.-]{2,30})(?:\\s*·|\\s*\\n|$)/);
+                    if (locMatch && !['Facebook', 'Terkini', 'Suka', 'Komentar', 'Bagikan'].includes(locMatch[1].trim())) {
+                        locationStr = locMatch[1].trim();
+                    }
+
+                    let musicMeta = '';
+                    let audioEl = p.querySelector('a[href*="/audio/"], a[href*="/music/"], span[aria-label*="audio" i]');
+                    if (audioEl) {
+                        musicMeta = (audioEl.innerText || audioEl.textContent || '').trim();
+                    }
+
                     return {
                         dom_index: idx,
                         signature: signature,
                         post_id: postId || String(Math.abs(hashString(postText))),
                         author: author,
+                        profile_url: profileUrl,
                         post_text: postText,
                         post_date: postDate,
-                        post_url: postUrl || window.location.href
+                        post_url: postUrl || window.location.href,
+                        comments_count: commentCount,
+                        reactions_count: reactionCount,
+                        shares_count: shareCount,
+                        plays_count: playCount,
+                        is_ad: isAd,
+                        is_pinned: isPinned,
+                        is_sponsored: isSponsored,
+                        location: locationStr,
+                        music_meta: musicMeta,
+                        has_comment_stats: hasCommentStats
                     };
                 }
             }
@@ -1177,38 +1647,70 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
             }
 
             return null;
-        """, list(processed_signatures))
+        """, list(seen_signatures), list(seen_post_ids), list(seen_post_urls))
 
         # Jika belum ada postingan baru di layar, scroll feed pencarian ke bawah
         if not next_post:
             empty_scrolls += 1
-            perform_feed_scroll(driver, distance=650)
-            pause_ctrl.sleep(random.uniform(2.0, 3.2))
+            perform_feed_scroll(driver, distance=750)
+            pause_ctrl.sleep(random.uniform(0.4, 0.7))
             continue
 
         # Postingan baru ditemukan
         empty_scrolls = 0
         p_sig = next_post.get('signature')
-        processed_signatures.add(p_sig)
-        total_posts_saved += 1
-
         p_id = next_post.get('post_id')
         p_author = next_post.get('author')
+        p_profile_url = next_post.get('profile_url', '')
         p_text = next_post.get('post_text')
         p_date = next_post.get('post_date')
         p_url = next_post.get('post_url')
+        clean_url = p_url.split('?')[0].rstrip('/') if p_url else ''
         dom_idx = next_post.get('dom_index', 0)
+        p_comments_count = next_post.get('comments_count', 0)
+        p_reactions_count = next_post.get('reactions_count', 0)
+        p_shares_count = next_post.get('shares_count', 0)
+        p_plays_count = next_post.get('plays_count', 0)
+        p_is_ad = next_post.get('is_ad', 'No')
+        p_is_pinned = next_post.get('is_pinned', 'No')
+        p_is_sponsored = next_post.get('is_sponsored', 'No')
+        p_location = next_post.get('location', '')
+        p_music_meta = next_post.get('music_meta', '')
+
+        # CHECK SHEET DEDUPLICATION (PYTHON LEVEL)
+        if p_sig in seen_signatures or (p_id and p_id in seen_post_ids) or (clean_url and clean_url in seen_post_urls):
+            seen_signatures.add(p_sig)
+            print(f"  [SUDAH ADA DI SHEET] Dilewati @{p_author}: \"{p_text[:40]}...\"")
+            continue
+
+        seen_signatures.add(p_sig)
+        if p_id: seen_post_ids.add(p_id)
+        if clean_url: seen_post_urls.add(clean_url)
+
+        # FILTER TAHUN: Lewati postingan usang (misal tahun 2024 atau sebelumnya)
+        if is_outdated_post(p_date, min_year=min_year):
+            print(f"  [DILEWATI] Postingan Usang ({p_date}) @{p_author}: \"{p_text[:40]}...\" (Filter aktif: Hanya tahun {min_year}+)")
+            continue
+
+        total_posts_saved += 1
 
         csv_keyword_label = f"[{group_name}] {keyword}" if group_name else keyword
+        p_hashtags = extract_hashtags(p_text)
+        p_lang = detect_language(p_text)
 
-        # Simpan metadata postingan
+        # Simpan metadata postingan (25 kolom standar konsisten)
         save_to_csv(post_csv, [
-            csv_keyword_label, p_id, p_date, p_author, p_text,
-            0, 0, 0, p_url
+            "Facebook", csv_keyword_label, p_id, p_date, p_author,
+            p_profile_url, "", 0, 0, "",
+            "", p_text, p_reactions_count, p_shares_count, p_plays_count,
+            p_comments_count, "", p_lang, p_hashtags,
+            p_is_ad, p_is_pinned, p_is_sponsored, p_location, p_music_meta, p_url
         ])
 
+        target_str = f"/{max_posts}" if max_posts > 0 else ""
         print("\n" + "=" * 65)
-        print(f"[POST #{total_posts_saved}/{max_posts}] @{p_author} ({p_date})")
+        com_info = f" ({p_comments_count} komentar)" if p_comments_count > 0 else ""
+        print(f"[POST #{total_posts_saved}{target_str}] @{p_author} ({p_date}){com_info}")
         print(f"  \"{p_text[:75]}...\"")
         print("  [*] LANGKAH 2: Klik Toggle Komentar...")
 
@@ -1221,34 +1723,81 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
 
             p.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
-            // 1. Cari tombol komentar spesifik
-            let clickTargets = p.querySelectorAll(
-                'div[aria-label*="Komentar"], div[aria-label*="Comment"], div[aria-label*="komentar"], div[role="button"][tabindex="0"], span[dir="auto"]'
-            );
-
-            for (let el of clickTargets) {
-                // Hindari mengklik link anchor yang membungkus ke permalink luar
-                if (el.closest('a[href*="/permalink/"], a[href*="/posts/"], a[href*="/photo/"]')) {
-                    continue;
+            function getElText(el) {
+                if (!el) return '';
+                let res = el.innerText || el.textContent || '';
+                let uses = el.querySelectorAll('use');
+                for (let u of uses) {
+                    let href = u.getAttribute('xlink:href') || u.getAttribute('href') || '';
+                    if (href.startsWith('#')) {
+                        let ref = document.getElementById(href.substring(1));
+                        if (ref) res += ' ' + (ref.textContent || ref.innerText || '');
+                    }
                 }
-                let txt = (el.innerText || el.textContent || '').toLowerCase();
+                return res.trim();
+            }
+
+            // 1. Target Utama: Cari tombol/span angka komentar spesifik (misal "250 komentar" atau <span dir="auto">250</span>)
+            let allNodes = p.querySelectorAll('div[role="button"], span[dir="auto"], span, div[dir="auto"]');
+            for (let el of allNodes) {
+                if (el.closest('a[href*="/permalink/"], a[href*="/posts/"], a[href*="/photo/"], a[href*="/groups/"]')) continue;
                 let aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                if (aria.includes('komentar') || aria.includes('comment') || txt === 'komentar' || txt.includes('komentar') || txt.includes('balasan')) {
-                    try { el.click(); return; } catch(e) {}
+                let txt = getElText(el).toLowerCase();
+                
+                let isCommentCount = (
+                    /\\b\\d+\\s*(?:komentar|comment|comments|balasan|replies)\\b/i.test(txt) ||
+                    /\\b\\d+\\s*(?:komentar|comment|comments|balasan|replies)\\b/i.test(aria)
+                );
+                
+                if (isCommentCount) {
+                    let clickTarget = el.closest('div[role="button"]') || el;
+                    try { clickTarget.click(); return; } catch(e) {}
                 }
             }
 
-            // 2. Fallback: Cari tombol role="button" di bagian bawah kartu postingan (Action Bar)
-            let bottomButtons = p.querySelectorAll('div[role="button"]');
-            for (let b of bottomButtons) {
+            // 2. Target Kedua: Cari tombol "Komentari" / "Beri komentar" / "Comment" di Action Bar
+            let actionBtns = p.querySelectorAll('div[role="button"]');
+            for (let b of actionBtns) {
+                if (b.closest('a[href*="/permalink/"], a[href*="/posts/"], a[href*="/photo/"]')) continue;
                 let aria = (b.getAttribute('aria-label') || '').toLowerCase();
-                if (aria.includes('komentar') || aria.includes('comment') || aria.includes('jawab')) {
+                let txt = getElText(b).toLowerCase();
+                
+                let isCommentAction = (
+                    aria === 'beri komentar' || aria === 'komentari' || aria === 'komentar' || aria === 'comment' || aria === 'leave a comment' ||
+                    aria.includes('komentari') || aria.includes('beri komentar') ||
+                    txt === 'komentari' || txt === 'komentar' || txt === 'comment'
+                );
+                
+                if (isCommentAction) {
                     try { b.click(); return; } catch(e) {}
                 }
             }
+
+            // 3. Target Ketiga: Cari span angka murni yang berada dalam konteks komentar (seperti <span dir="auto">250</span>)
+            for (let el of allNodes) {
+                if (el.closest('a[href*="/permalink/"], a[href*="/posts/"], a[href*="/photo/"]')) continue;
+                let txt = (el.innerText || el.textContent || '').trim();
+                let aria = (el.getAttribute('aria-label') || '').toLowerCase();
+                let parentTxt = el.parentElement ? (el.parentElement.innerText || el.parentElement.textContent || '').toLowerCase() : '';
+                let parentAria = el.parentElement ? (el.parentElement.getAttribute('aria-label') || '').toLowerCase() : '';
+
+                if (/^\\d+(?:[.,]\\d+)?\\s*(?:rb|k|m)?$/i.test(txt)) {
+                    let isCom = aria.includes('komentar') || aria.includes('comment') || parentAria.includes('komentar') || parentAria.includes('comment') || parentTxt.includes('komentar');
+                    if (isCom) {
+                        let clickTarget = el.closest('div[role="button"]') || el;
+                        try { clickTarget.click(); return; } catch(e) {}
+                    }
+                }
+            }
+
+            // 4. Fallback: Klik teks postingan / area kartu postingan untuk memicu modal dialog
+            let textEl = p.querySelector('div[dir="auto"], div[data-ad-preview="message"]');
+            if (textEl) {
+                try { textEl.click(); return; } catch(e) {}
+            }
         """, dom_idx)
 
-        pause_ctrl.sleep(random.uniform(2.0, 2.8))
+        pause_ctrl.sleep(random.uniform(0.4, 0.7))
 
         # LANGKAH 3: UBAH FILTER MENJADI SEMUA KOMENTAR
         print("  [*] LANGKAH 3: Mengubah Filter Menjadi 'Semua Komentar'...")
@@ -1257,26 +1806,29 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
         # LANGKAH 4: SCROLL SAMPAI HABIS & BONGKAR SEMUA BALASAN KOMENTAR
         print("  [*] LANGKAH 4: Scroll kontainer komentar & bongkar balasan...")
         post_comments = exhaustively_scroll_and_extract_comments(
-            driver, max_idle_scrolls=4, max_total_comments_limit=max_comments_per_post
+            driver, max_idle_scrolls=3, max_total_comments_limit=max_comments_per_post, seen_comment_keys=seen_comment_keys
         )
 
-        # Simpan seluruh komentar & balasan postingan ini ke CSV
+        # Simpan seluruh komentar & balasan postingan ini ke CSV (14 kolom standar konsisten)
         for c in post_comments:
+            c_prof_url = c.get('profile_url', '')
+            c_username = c.get('username') or c.get('author', 'Warga')
+            c_is_rep = "Yes" if str(c.get('is_reply', '')).upper() in ['YA', 'YES', 'TRUE', '1'] else "No"
             save_to_csv(comment_csv, [
-                p_id, csv_keyword_label, c.get('comment_id'), c.get('comment_date'),
-                c.get('author'), c.get('comment_text'), c.get('likes', 0),
-                c.get('reply_count', 0), c.get('is_reply', 'TIDAK'), c.get('reply_to', ''), p_url
+                "Facebook", csv_keyword_label, p_id, c.get('comment_id'), c.get('comment_date'),
+                c.get('author'), c_username, c_prof_url, c.get('comment_text'), c.get('likes', 0),
+                c.get('reply_count', 0), c_is_rep, c.get('reply_to', ''), p_url
             ])
             total_comments_saved += 1
 
-        print(f"  [+] Selesai Post #{total_posts_saved}. Total {len(post_comments)} komentar & balasan tersimpan!")
+        print(f"  [+] Selesai Post #{total_posts_saved}. Total {len(post_comments)} komentar & balasan baru tersimpan!")
 
-        # Tutup dialog postingan dan pastikan kembali ke feed pencarian (bukan tertahan di permalink)
+        # Tutup dialog postingan dan pastikan kembali ke feed pencarian
         close_post_dialog(driver, search_url=search_url)
-        pause_ctrl.sleep(0.8)
+        pause_ctrl.sleep(0.15)
         # Scroll feed pencarian ke bawah sedikit untuk memuat postingan berikutnya
-        perform_feed_scroll(driver, distance=400)
-        pause_ctrl.sleep(1.2)
+        perform_feed_scroll(driver, distance=350)
+        pause_ctrl.sleep(0.2)
 
     print(f"\n[*] Selesai pencarian '{keyword}'. Total {total_posts_saved} post & {total_comments_saved} komentar tersimpan di '{comment_csv}'.")
 
@@ -1342,9 +1894,13 @@ def run_live_interactive_sniffer():
                 rep_cnt = c.get('reply_count', 0)
                 current_url = driver.current_url
 
+                c_prof_url = c.get('profile_url', '')
+                c_username = c.get('username') or c_author
+                c_is_rep_str = "Yes" if str(is_rep).upper() in ['YA', 'YES', 'TRUE', '1'] else "No"
                 save_to_csv(comment_csv, [
-                    "Live_Monitoring", "Manual_Browse", c_id, c_date,
-                    c_author, c_text, c_likes, rep_cnt, is_rep, rep_to, current_url
+                    "Facebook", "Live_Monitoring", "Manual_Browse", c_id, c_date,
+                    c_author, c_username, c_prof_url, c_text, c_likes,
+                    rep_cnt, c_is_rep_str, rep_to, current_url
                 ])
 
                 if is_rep == 'YA':
@@ -1378,6 +1934,7 @@ def run_facebook_scraper():
     parser.add_argument("--keyword", type=str, help="Kata kunci tunggal pencarian")
     parser.add_argument("--max-posts", type=int, help="Maksimal postingan per kata kunci")
     parser.add_argument("--max-comments", type=int, help="Maksimal komentar per postingan")
+    parser.add_argument("--min-year", type=int, default=2025, help="Tahun minimal postingan yang diambil (default: 2025)")
     args, unknown = parser.parse_known_args()
 
     mode = args.mode
@@ -1405,6 +1962,7 @@ def run_facebook_scraper():
     base_output_name = args.output or ""
     max_posts_target = args.max_posts or 20
     max_comments_limit = args.max_comments or 150
+    min_post_year = args.min_year or 2025
 
     if mode == "1":
         if args.keyword:
@@ -1416,10 +1974,16 @@ def run_facebook_scraper():
             base_output_name = input("Nama file output (default: fb_isu_daerah): ").strip() or "fb_isu_daerah"
         if not args.max_posts:
             try:
-                p_in = input("Maksimal postingan per kata kunci (default: 20): ").strip()
+                p_in = input("Maksimal postingan per kata kunci [0 untuk tanpa batas] (default: 20): ").strip()
                 max_posts_target = int(p_in) if p_in else 20
             except ValueError:
                 max_posts_target = 20
+        if not args.max_comments:
+            try:
+                c_in = input("Maksimal komentar per postingan [0 untuk semua komentar] (default: 150): ").strip()
+                max_comments_limit = int(c_in) if c_in else 150
+            except ValueError:
+                max_comments_limit = 150
 
     elif mode == "2":
         if args.group:
@@ -1441,6 +2005,19 @@ def run_facebook_scraper():
         if not base_output_name:
             base_output_name = input("Nama file output (default: fb_grup_monitoring): ").strip() or "fb_grup_monitoring"
 
+        if not args.max_posts:
+            try:
+                p_in = input("Maksimal postingan per grup / pencarian [0 untuk tanpa batas] (default: 20): ").strip()
+                max_posts_target = int(p_in) if p_in else 20
+            except ValueError:
+                max_posts_target = 20
+        if not args.max_comments:
+            try:
+                c_in = input("Maksimal komentar per postingan [0 untuk semua komentar] (default: 150): ").strip()
+                max_comments_limit = int(c_in) if c_in else 150
+            except ValueError:
+                max_comments_limit = 150
+
     post_csv, comment_csv = get_output_csv_paths(base_output_name)
     init_posts_csv(post_csv)
     init_comments_csv(comment_csv)
@@ -1455,7 +2032,7 @@ def run_facebook_scraper():
     try:
         driver, profile_dir = get_driver()
         driver.get("https://www.facebook.com")
-        pause_ctrl.sleep(3)
+        pause_ctrl.sleep(2.0)
     except Exception as e:
         print(f"[ERROR] Gagal membuka browser: {e}")
         return
@@ -1467,8 +2044,8 @@ def run_facebook_scraper():
                     break
                 search_url = f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(kw)}&filters={FB_CHRONOSORT_FILTER}"
                 driver.get(search_url)
-                pause_ctrl.sleep(3.5)
-                process_search_workflow(driver, kw, post_csv, comment_csv, max_posts=max_posts_target, max_comments_per_post=max_comments_limit)
+                pause_ctrl.sleep(2.0)
+                process_search_workflow(driver, kw, post_csv, comment_csv, max_posts=max_posts_target, max_comments_per_post=max_comments_limit, min_year=min_post_year)
 
         elif mode == "2":
             for grp in groups:
@@ -1482,7 +2059,7 @@ def run_facebook_scraper():
                 print(f"[*] MEMBUKA GRUP FACEBOOK: {grp_clean}")
                 print("=" * 65)
                 driver.get(grp_clean)
-                pause_ctrl.sleep(3.5)
+                pause_ctrl.sleep(2.0)
 
                 for kw in keywords:
                     if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
@@ -1491,21 +2068,23 @@ def run_facebook_scraper():
                         target_url = f"{grp_clean}/?sorting_setting=CHRONOLOGICAL"
                         print(f"[*] Membuka Feed Kronologis Terbaru di grup '{grp_slug}'...")
                         driver.get(target_url)
-                        pause_ctrl.sleep(3.5)
+                        pause_ctrl.sleep(2.0)
                         process_search_workflow(
                             driver, "Feed Terbaru", post_csv, comment_csv,
                             max_posts=max_posts_target, max_comments_per_post=max_comments_limit,
-                            custom_search_url=target_url, group_name=grp_slug
+                            custom_search_url=target_url, group_name=grp_slug,
+                            min_year=min_post_year
                         )
                     else:
                         target_url = f"{grp_clean}/search/?q={urllib.parse.quote(kw)}&filters={FB_CHRONOSORT_FILTER}"
                         print(f"[*] Melakukan pencarian '{kw}' di dalam grup '{grp_slug}' (Filter: Postingan Terbaru)...")
                         driver.get(target_url)
-                        pause_ctrl.sleep(3.5)
+                        pause_ctrl.sleep(2.0)
                         process_search_workflow(
                             driver, kw, post_csv, comment_csv,
                             max_posts=max_posts_target, max_comments_per_post=max_comments_limit,
-                            custom_search_url=target_url, group_name=grp_slug
+                            custom_search_url=target_url, group_name=grp_slug,
+                            min_year=min_post_year
                         )
 
         print("\n" + "=" * 65)

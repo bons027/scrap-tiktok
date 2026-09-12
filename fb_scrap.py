@@ -1626,10 +1626,10 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                         groupId = pageGrpM[1];
                     }
 
-                    // 2. Scan semua link di dalam kartu postingan
-                    let links = p.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"], a[href*="/videos/"], a[href*="/reel/"], a[href*="story_fbid="], a[href*="multi_permalinks="], a[href*="/groups/"], a[role="link"][href], a[href]');
+                    // 2. Scan semua link di dalam kartu postingan (prioritaskan timestamp link, permalink, multi_permalinks, posts)
+                    let links = p.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"], a[href*="multi_permalinks"], a[href*="story_fbid="], a[href*="/videos/"], a[href*="/reel/"], a[href*="/groups/"], a[role="link"][href], a[href]');
                     for (let a of links) {
-                        let href = a.href || '';
+                        let href = a.href || a.getAttribute('href') || '';
                         if (!href) continue;
 
                         if (href.includes('rdid=')) {
@@ -1637,14 +1637,14 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                             if (mRd && mRd[1] && !rdid) rdid = mRd[1];
                         }
 
-                        let grpM = href.match(/facebook\\.com\\/groups\\/([^/?#]+)/);
+                        let grpM = href.match(/facebook\\.com\\/groups\\/([^/?#]+)/) || href.match(/\\/groups\\/([^/?#]+)/);
                         if (grpM && !['search', 'feed', 'joins', 'create', 'discover'].includes(grpM[1].toLowerCase())) {
                             if (!groupId) groupId = grpM[1];
                         }
 
-                        if (href.includes('/posts/') || href.includes('/permalink/') || href.includes('/videos/') || href.includes('/reel/') || href.includes('story_fbid=') || href.includes('multi_permalinks=') || href.includes('set=gm.') || href.includes('set=pcb.')) {
+                        if (href.includes('/posts/') || href.includes('/permalink/') || href.includes('/videos/') || href.includes('/reel/') || href.includes('story_fbid=') || href.includes('multi_permalinks') || href.includes('set=gm.') || href.includes('set=pcb.') || href.includes('fbid=')) {
                             if (!rawPostLink) rawPostLink = href;
-                            let match = href.match(/(?:posts|permalink|videos|story_fbid=|multi_permalinks=|set=gm\\.|set=pcb\\.|fbid=)[/=?]?([0-9]{8,25})/);
+                            let match = href.match(/(?:posts|permalink|videos|reel|story_fbid=|multi_permalinks=|multi_permalinks%3D|set=gm\\.|set=pcb\\.|fbid=)[/=?%3D]?([0-9]{8,25})/i);
                             if (match && match[1]) {
                                 postId = match[1];
                                 break;
@@ -1652,11 +1652,12 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                         }
                     }
 
+                    // Fallback 1: Scan link dengan digit panjang (10-25 digit) yang bukan group id
                     if (!postId) {
                         for (let a of links) {
-                            let href = a.href || '';
-                            let match = href.match(/(?:posts|permalink|videos|reel|story_fbid=|multi_permalinks=)[/=?]?([0-9]+)/);
-                            if (match && match[1]) {
+                            let href = a.href || a.getAttribute('href') || '';
+                            let match = href.match(/([0-9]{10,25})/);
+                            if (match && match[1] && match[1] !== groupId) {
                                 postId = match[1];
                                 if (!rawPostLink) rawPostLink = href;
                                 break;
@@ -1664,9 +1665,18 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                         }
                     }
 
+                    // Fallback 2: Scan innerHTML kartu postingan untuk mencari ID postingan (multi_permalinks, post_id, story_fbid)
+                    if (!postId) {
+                        let inner = p.innerHTML || '';
+                        let mInner = inner.match(/(?:multi_permalinks[":\\[=]+|story_fbid[":\\[=]+|post_id[":\\[=]+|target_fbid[":\\[=]+|feedback_target_id[":\\[=]+|mf_story_key[":\\[=]+)([0-9]{8,25})/i);
+                        if (mInner && mInner[1] && mInner[1] !== groupId) {
+                            postId = mInner[1];
+                        }
+                    }
+
                     // Susun Canonical Permalink Format
                     let rdidQuery = rdid ? `?rdid=${rdid}` : '';
-                    if (groupId && postId) {
+                    if (groupId && postId && postId !== groupId) {
                         postUrl = `https://www.facebook.com/groups/${groupId}/permalink/${postId}/${rdidQuery}`;
                     } else if (rawPostLink) {
                         if (rawPostLink.includes('/reel/')) {

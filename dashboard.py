@@ -194,7 +194,7 @@ if not ('sentiment' in df_raw.columns and 'topic' in df_raw.columns):
     
     # Preview data mentah
     st.subheader("Preview Data Mentah:")
-    preview_cols = [c for c in ['platform', 'profile_name', 'username', 'comment_text', 'description', 'likes', 'video_url', 'post_url'] if c in df_raw.columns]
+    preview_cols = [c for c in ['platform', 'post_author', 'profile_name', 'username', 'comment_text', 'post_description', 'description', 'likes', 'video_url', 'post_url'] if c in df_raw.columns]
     if not preview_cols:
         preview_cols = df_raw.columns[:6].tolist()
     st.dataframe(df_raw[preview_cols].head(10), use_container_width=True)
@@ -384,7 +384,7 @@ st.plotly_chart(fig_stacked, use_container_width=True)
 st.subheader("📋 Eksplorasi Detail Data & Komentar")
 st.caption(f"Menampilkan {len(filtered_df):,} dari {len(df):,} baris sesuai filter.")
 
-cols_to_show = ['sentiment', 'topic', 'key_point', 'comment_text', 'description', 'likes', 'shares', 'plays', 'profile_name', 'username', 'platform', 'comment_date', 'post_date', 'video_url']
+cols_to_show = ['sentiment', 'topic', 'key_point', 'comment_text', 'post_description', 'description', 'likes', 'shares', 'plays', 'post_author', 'profile_name', 'username', 'platform', 'comment_date', 'post_date', 'video_url']
 available_cols = [c for c in cols_to_show if c in filtered_df.columns]
 
 # Format styling badge sentimen

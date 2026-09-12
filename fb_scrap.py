@@ -685,9 +685,11 @@ def init_comments_csv(filename):
         with open(filename, mode='w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
-                'platform', 'search_keyword', 'post_id', 'comment_id', 'comment_date',
-                'profile_name', 'username', 'profile_url', 'comment_text', 'likes',
-                'reply_count', 'is_reply', 'reply_to', 'video_url'
+                'platform', 'search_keyword', 'post_id', 'post_date', 'post_author',
+                'post_profile_url', 'post_description', 'post_likes', 'post_shares', 'post_plays',
+                'post_comments_count', 'comment_id', 'comment_date', 'profile_name', 'username',
+                'profile_url', 'comment_text', 'likes', 'reply_count', 'is_reply',
+                'reply_to', 'text_language', 'hashtags_used', 'location_of_creation', 'video_url'
             ])
 
 
@@ -2130,15 +2132,20 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
             driver, max_idle_scrolls=3, max_total_comments_limit=max_comments_per_post, seen_comment_keys=seen_comment_keys
         )
 
-        # Simpan seluruh komentar & balasan postingan ini ke CSV (14 kolom standar konsisten)
+        # Simpan seluruh komentar & balasan postingan ini ke CSV (25 kolom terstandarisasi dengan konteks postingan)
         for c in post_comments:
             c_prof_url = c.get('profile_url', '')
             c_username = c.get('username') or c.get('author', 'Warga')
+            c_author = c.get('author', 'Warga')
+            c_text = c.get('comment_text', '')
+            c_lang = detect_language(c_text)
             c_is_rep = "Yes" if str(c.get('is_reply', '')).upper() in ['YA', 'YES', 'TRUE', '1'] else "No"
             save_to_csv(comment_csv, [
-                "Facebook", csv_keyword_label, p_id, c.get('comment_id'), c.get('comment_date'),
-                c.get('author'), c_username, c_prof_url, c.get('comment_text'), c.get('likes', 0),
-                c.get('reply_count', 0), c_is_rep, c.get('reply_to', ''), p_url
+                "Facebook", csv_keyword_label, p_id, p_date, p_author,
+                p_profile_url, p_text, p_reactions_count, p_shares_count, p_plays_count,
+                p_comments_count, c.get('comment_id'), c.get('comment_date'), c_author, c_username,
+                c_prof_url, c_text, c.get('likes', 0), c.get('reply_count', 0), c_is_rep,
+                c.get('reply_to', ''), c_lang, p_hashtags, p_location, p_url
             ])
             total_comments_saved += 1
 
@@ -2219,10 +2226,13 @@ def run_live_interactive_sniffer():
                 c_prof_url = c.get('profile_url', '')
                 c_username = c.get('username') or c_author
                 c_is_rep_str = "Yes" if str(is_rep).upper() in ['YA', 'YES', 'TRUE', '1'] else "No"
+                c_lang = detect_language(c_text)
                 save_to_csv(comment_csv, [
-                    "Facebook", "Live_Monitoring", "Manual_Browse", c_id, c_date,
-                    c_author, c_username, c_prof_url, c_text, c_likes,
-                    rep_cnt, c_is_rep_str, rep_to, current_url
+                    "Facebook", "Live_Monitoring", "Manual_Live", "Terkini", "Live_Post",
+                    "", "Postingan Live Monitor", 0, 0, 0,
+                    0, c_id, c_date, c_author, c_username,
+                    c_prof_url, c_text, c_likes, rep_cnt, c_is_rep_str,
+                    rep_to, c_lang, "", "", current_url
                 ])
 
                 if is_rep == 'YA':

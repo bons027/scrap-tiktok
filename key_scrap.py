@@ -642,16 +642,20 @@ def init_csv(filename):
                     'is_ad', 'is_pinned', 'is_sponsored', 'location_of_creation', 'music_meta', 'video_url'
                 ])
 
+COMMENTS_CSV_HEADER = [
+    'platform', 'search_keyword', 'post_id', 'post_date', 'post_author',
+    'post_profile_url', 'post_description', 'post_likes', 'post_shares', 'post_plays',
+    'post_comments_count', 'comment_id', 'comment_date', 'profile_name', 'username',
+    'profile_url', 'comment_text', 'likes', 'reply_count', 'is_reply',
+    'reply_to', 'text_language', 'hashtags_used', 'location_of_creation', 'video_url'
+]
+
 def init_comments_csv(filename):
     with csv_lock:
         if not os.path.isfile(filename):
             with open(filename, mode='w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow([
-                    'platform', 'search_keyword', 'post_id', 'comment_id', 'comment_date',
-                    'profile_name', 'username', 'profile_url', 'comment_text', 'likes',
-                    'reply_count', 'is_reply', 'reply_to', 'video_url'
-                ])
+                writer.writerow(COMMENTS_CSV_HEADER)
 
 def save_to_csv(filename, data_row):
     """
@@ -736,12 +740,29 @@ def load_videos_from_csv(csv_path, min_year=2025):
             if vid_id and vid_url and vid_id.lower() != 'none' and vid_id not in seen_ids:
                 seen_ids.add(vid_id)
                 videos.append({
-                    'video_id': vid_id,
-                    'video_url': vid_url,
+                    'platform': row_lower.get('platform') or 'TikTok',
                     'keyword': kw,
+                    'video_id': vid_id,
+                    'post_id': vid_id,
+                    'video_url': vid_url,
+                    'upload_date': u_date,
+                    'post_date': u_date,
                     'username': u_name,
+                    'post_author': u_name,
+                    'author_profile_url': row_lower.get('profile_url') or row_lower.get('author_profile_url') or '',
+                    'post_profile_url': row_lower.get('profile_url') or row_lower.get('author_profile_url') or '',
                     'description': u_desc,
-                    'upload_date': u_date
+                    'post_description': u_desc,
+                    'likes': row_lower.get('likes') or 0,
+                    'post_likes': row_lower.get('likes') or 0,
+                    'shares': row_lower.get('shares') or 0,
+                    'post_shares': row_lower.get('shares') or 0,
+                    'plays': row_lower.get('plays') or 0,
+                    'post_plays': row_lower.get('plays') or 0,
+                    'comments_count': row_lower.get('comments_count') or 0,
+                    'post_comments_count': row_lower.get('comments_count') or 0,
+                    'hashtags_used': row_lower.get('hashtags_used') or '',
+                    'location_of_creation': row_lower.get('location_of_creation') or '',
                 })
     return videos
 
@@ -771,12 +792,24 @@ def get_already_scraped_video_ids(comments_csv_path):
 # ==========================================
 # 5. FUNGSI SCRAPING KOMENTAR PER VIDEO
 # ==========================================
-def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv, max_comments=50, worker_prefix=""):
+def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv, max_comments=50, worker_prefix="", video_meta=None):
     if not video_url or not video_id:
         return 0
     if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
         return 0
         
+    v_meta = video_meta or {}
+    p_date = v_meta.get('post_date') or v_meta.get('upload_date') or "Terkini"
+    p_author = v_meta.get('post_author') or v_meta.get('author_nickname') or v_meta.get('username') or "Unknown"
+    p_prof_url = v_meta.get('post_profile_url') or v_meta.get('author_profile_url') or ""
+    p_desc = v_meta.get('post_description') or v_meta.get('description') or ""
+    p_likes = v_meta.get('post_likes') or v_meta.get('likes') or 0
+    p_shares = v_meta.get('post_shares') or v_meta.get('shares') or 0
+    p_plays = v_meta.get('post_plays') or v_meta.get('plays') or 0
+    p_comments_count = v_meta.get('post_comments_count') or v_meta.get('comments_count') or 0
+    p_hashtags = v_meta.get('hashtags_used') or ""
+    p_location = v_meta.get('location_of_creation') or ""
+
     w_tag = f"[{worker_prefix}] " if worker_prefix else ""
     print(f"\n  {w_tag}Mengakses Video ID {video_id}: {video_url}")
     driver.get(video_url)
@@ -849,10 +882,13 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
                                 cdate = "Error"
                                 
                             prof_url = f"https://www.tiktok.com/@{uname}" if uname and uname != 'Unknown' else ""
+                            c_lang = detect_language(txt)
                             save_to_csv(comments_csv, [
-                                "TikTok", keyword, video_id, cid, cdate,
-                                nname, uname, prof_url, txt, likes,
-                                replies, "No", "", video_url
+                                "TikTok", keyword, video_id, p_date, p_author,
+                                p_prof_url, p_desc, p_likes, p_shares, p_plays,
+                                p_comments_count, cid, cdate, nname, uname,
+                                prof_url, txt, likes, replies, "No",
+                                "", c_lang, p_hashtags, p_location, video_url
                             ])
                             new_in_batch += 1
                             total_captured += 1
@@ -892,10 +928,13 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
                 if cid not in seen_comment_ids:
                     seen_comment_ids.add(cid)
                     dom_prof_url = c.get('user_url') or (f"https://www.tiktok.com/@{c['username']}" if c['username'] != 'Unknown' else "")
+                    c_lang = detect_language(c['text'])
                     save_to_csv(comments_csv, [
-                        "TikTok", keyword, video_id, cid, "Unknown",
-                        c['nickname'], c['username'], dom_prof_url, c['text'], 0,
-                        0, "No", "", video_url
+                        "TikTok", keyword, video_id, p_date, p_author,
+                        p_prof_url, p_desc, p_likes, p_shares, p_plays,
+                        p_comments_count, cid, "Unknown", c['nickname'], c['username'],
+                        dom_prof_url, c['text'], 0, 0, "No",
+                        "", c_lang, p_hashtags, p_location, video_url
                     ])
                     new_in_batch += 1
                     total_captured += 1
@@ -976,7 +1015,8 @@ def comment_scraping_worker(worker_id, video_queue, comments_csv, max_comments, 
                 keyword=v_data.get('keyword', 'Unknown'),
                 comments_csv=comments_csv,
                 max_comments=max_comments,
-                worker_prefix=worker_tag
+                worker_prefix=worker_tag,
+                video_meta=v_data
             )
             video_queue.task_done()
             pause_ctrl.sleep(random.uniform(1.2, 2.2))
@@ -1322,11 +1362,29 @@ def run_scraper():
                                         ])
                                         
                                         collected_videos.append({
-                                            'video_id': vid_id,
-                                            'video_url': vid_url,
+                                            'platform': 'TikTok',
                                             'keyword': keyword,
+                                            'video_id': vid_id,
+                                            'post_id': vid_id,
+                                            'video_url': vid_url,
+                                            'upload_date': upload_date,
+                                            'post_date': upload_date,
                                             'username': author_nickname,
-                                            'description': desc
+                                            'post_author': author_nickname,
+                                            'author_profile_url': author_profile_url,
+                                            'post_profile_url': author_profile_url,
+                                            'description': desc,
+                                            'post_description': desc,
+                                            'likes': likes,
+                                            'post_likes': likes,
+                                            'shares': shares,
+                                            'post_shares': shares,
+                                            'plays': plays,
+                                            'post_plays': plays,
+                                            'comments_count': comment_count,
+                                            'post_comments_count': comment_count,
+                                            'hashtags_used': hashtags_used,
+                                            'location_of_creation': location_of_creation,
                                         })
                                         
                                         print(f"    + [#{len(global_seen_video_ids)}] [{upload_date}] {desc[:35]}... ({comment_count} komentar)")
@@ -1426,11 +1484,29 @@ def run_scraper():
                                     "No", "No", "No", "", d_music, d_url
                                 ])
                                 collected_videos.append({
-                                    'video_id': d_id,
-                                    'video_url': d_url,
+                                    'platform': 'TikTok',
                                     'keyword': keyword,
+                                    'video_id': d_id,
+                                    'post_id': d_id,
+                                    'video_url': d_url,
+                                    'upload_date': 'Terkini',
+                                    'post_date': 'Terkini',
                                     'username': d_author,
-                                    'description': d_desc
+                                    'post_author': d_author,
+                                    'author_profile_url': d_author_url,
+                                    'post_profile_url': d_author_url,
+                                    'description': d_desc,
+                                    'post_description': d_desc,
+                                    'likes': 0,
+                                    'post_likes': 0,
+                                    'shares': 0,
+                                    'post_shares': 0,
+                                    'plays': d_plays,
+                                    'post_plays': d_plays,
+                                    'comments_count': 0,
+                                    'post_comments_count': 0,
+                                    'hashtags_used': d_tags,
+                                    'location_of_creation': '',
                                 })
                                 print(f"    + [#{len(global_seen_video_ids)}] [DOM] {d_desc[:35]}... (@{d_author})")
                     except Exception:

@@ -46,9 +46,11 @@ POSTS_CSV_HEADER = [
 ]
 
 COMMENTS_CSV_HEADER = [
-    "platform", "search_keyword", "post_id", "comment_id", "comment_date",
-    "profile_name", "username", "profile_url", "comment_text", "likes",
-    "reply_count", "is_reply", "reply_to", "video_url"
+    "platform", "search_keyword", "post_id", "post_date", "post_author",
+    "post_profile_url", "post_description", "post_likes", "post_shares", "post_plays",
+    "post_comments_count", "comment_id", "comment_date", "profile_name", "username",
+    "profile_url", "comment_text", "likes", "reply_count", "is_reply",
+    "reply_to", "text_language", "hashtags_used", "location_of_creation", "video_url"
 ]
 
 # Thread-safe Locks & Global Deduplication Tracking

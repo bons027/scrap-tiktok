@@ -555,6 +555,95 @@ def detect_language(text):
     return "id"
 
 
+def format_facebook_url(raw_url="", current_page_url="", post_id="", author="", group_name=""):
+    """
+    Memformat URL postingan Facebook secara standar & konsisten sesuai format canonical permalink:
+    - Postingan Grup: https://www.facebook.com/groups/{group_id}/permalink/{post_id}/ (atau ?rdid=... jika ada)
+    - Postingan Reel: https://www.facebook.com/reel/{reel_id}/
+    - Postingan User/Page: https://www.facebook.com/{author_username}/posts/{post_id}/
+    """
+    raw_url = (raw_url or '').strip()
+    current_page_url = (current_page_url or '').strip()
+    post_id = str(post_id or '').strip()
+
+    rdid = ''
+    # Ekstraksi rdid jika ada di raw_url atau current_page_url
+    if 'rdid=' in raw_url:
+        m_rd = re.search(r'[?&]rdid=([a-zA-Z0-9_-]+)', raw_url)
+        if m_rd:
+            rdid = m_rd.group(1)
+    elif 'rdid=' in current_page_url:
+        m_rd = re.search(r'[?&]rdid=([a-zA-Z0-9_-]+)', current_page_url)
+        if m_rd:
+            rdid = m_rd.group(1)
+
+    rdid_suffix = f"?rdid={rdid}" if rdid else ""
+
+    # 1. Cari group_id / group_slug
+    group_id = ''
+    m_grp = re.search(r'facebook\.com/groups/([^/?#]+)', raw_url)
+    if m_grp and m_grp.group(1).lower() not in ['search', 'feed', 'joins', 'create', 'discover']:
+        group_id = m_grp.group(1)
+
+    if not group_id and current_page_url:
+        m_grp_page = re.search(r'facebook\.com/groups/([^/?#]+)', current_page_url)
+        if m_grp_page and m_grp_page.group(1).lower() not in ['search', 'feed', 'joins', 'create', 'discover']:
+            group_id = m_grp_page.group(1)
+
+    if not group_id and group_name:
+        group_id = str(group_name).strip()
+
+    # 2. Cari post_id jika belum ada
+    extracted_post_id = post_id
+    if not extracted_post_id:
+        m_fbid = re.search(r'[?&](?:story_fbid|multi_permalinks|fbid)=([0-9]+)', raw_url)
+        if m_fbid:
+            extracted_post_id = m_fbid.group(1)
+        if not extracted_post_id:
+            m_pid = re.search(r'/(?:posts|permalink|videos|reel)/([0-9]+)', raw_url)
+            if m_pid:
+                extracted_post_id = m_pid.group(1)
+        if not extracted_post_id:
+            m_set = re.search(r'set=(?:gm|pcb)\.([0-9]+)', raw_url)
+            if m_set:
+                extracted_post_id = m_set.group(1)
+
+    # Cek apakah story_fbid memiliki id=group_id
+    if not group_id and ('story_fbid=' in raw_url or 'multi_permalinks=' in raw_url):
+        m_id = re.search(r'[?&]id=([0-9]+)', raw_url)
+        if m_id:
+            group_id = m_id.group(1)
+
+    # 3. Format Permalink Grup (Format canonical utama)
+    if group_id and extracted_post_id:
+        return f"https://www.facebook.com/groups/{group_id}/permalink/{extracted_post_id}/{rdid_suffix}"
+
+    # 4. Format Reel / Video
+    if '/reel/' in raw_url or (extracted_post_id and '/reel/' in (raw_url or current_page_url)):
+        r_id = extracted_post_id or (re.search(r'/reel/([0-9]+)', raw_url).group(1) if re.search(r'/reel/([0-9]+)', raw_url) else '')
+        if r_id:
+            return f"https://www.facebook.com/reel/{r_id}/"
+
+    # 5. Format User / Halaman Post
+    m_user_post = re.search(r'facebook\.com/([^/?#]+)/posts/([0-9]+)', raw_url)
+    if m_user_post and m_user_post.group(1).lower() not in ['groups', 'permalink.php', 'story.php']:
+        return f"https://www.facebook.com/{m_user_post.group(1)}/posts/{m_user_post.group(2)}/{rdid_suffix}"
+
+    # 6. Jika ada author dan post_id
+    if extracted_post_id and author and author != 'Warga':
+        author_slug = re.sub(r'[^a-zA-Z0-9.]', '', author.lower())
+        if author_slug and len(author_slug) >= 3:
+            return f"https://www.facebook.com/{author_slug}/posts/{extracted_post_id}/{rdid_suffix}"
+
+    if raw_url and not raw_url.startswith('https://www.facebook.com/search/'):
+        return raw_url
+
+    if extracted_post_id:
+        return f"https://www.facebook.com/permalink.php?story_fbid={extracted_post_id}"
+
+    return raw_url or current_page_url or "https://www.facebook.com"
+
+
 def init_posts_csv(filename):
     if not os.path.isfile(filename):
         with open(filename, mode='w', newline='', encoding='utf-8') as f:
@@ -1523,16 +1612,75 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
 
                     let signature = author + ':::' + postText.substring(0, 45);
 
+                    let targetGroupName = arguments[3] || '';
                     let postUrl = '';
                     let postId = '';
-                    let links = p.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"], a[href*="/videos/"], a[href*="/reel/"], a[href*="story_fbid="], a[href*="multi_permalinks="], a[href*="/groups/"], a[role="link"]');
+                    let rawPostLink = '';
+                    let groupId = targetGroupName;
+                    let rdid = '';
+
+                    // 1. Periksa apakah halaman aktif berada di dalam grup
+                    let currHref = window.location.href || '';
+                    let pageGrpM = currHref.match(/facebook\\.com\\/groups\\/([^/?#]+)/);
+                    if (pageGrpM && !['search', 'feed', 'joins', 'create', 'discover'].includes(pageGrpM[1].toLowerCase())) {
+                        groupId = pageGrpM[1];
+                    }
+
+                    // 2. Scan semua link di dalam kartu postingan
+                    let links = p.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"], a[href*="/videos/"], a[href*="/reel/"], a[href*="story_fbid="], a[href*="multi_permalinks="], a[href*="/groups/"], a[role="link"][href], a[href]');
                     for (let a of links) {
                         let href = a.href || '';
-                        if (href.includes('/posts/') || href.includes('/permalink/') || href.includes('/videos/') || href.includes('story_fbid=') || href.includes('multi_permalinks=')) {
-                            postUrl = href.split('?')[0];
-                            let match = href.match(/(?:posts|permalink|videos|story_fbid=|multi_permalinks=)[/=?]?([0-9]+)/);
-                            if (match && match[1]) postId = match[1];
-                            break;
+                        if (!href) continue;
+
+                        if (href.includes('rdid=')) {
+                            let mRd = href.match(/[?&]rdid=([a-zA-Z0-9_-]+)/);
+                            if (mRd && mRd[1] && !rdid) rdid = mRd[1];
+                        }
+
+                        let grpM = href.match(/facebook\\.com\\/groups\\/([^/?#]+)/);
+                        if (grpM && !['search', 'feed', 'joins', 'create', 'discover'].includes(grpM[1].toLowerCase())) {
+                            if (!groupId) groupId = grpM[1];
+                        }
+
+                        if (href.includes('/posts/') || href.includes('/permalink/') || href.includes('/videos/') || href.includes('/reel/') || href.includes('story_fbid=') || href.includes('multi_permalinks=') || href.includes('set=gm.') || href.includes('set=pcb.')) {
+                            if (!rawPostLink) rawPostLink = href;
+                            let match = href.match(/(?:posts|permalink|videos|story_fbid=|multi_permalinks=|set=gm\\.|set=pcb\\.|fbid=)[/=?]?([0-9]{8,25})/);
+                            if (match && match[1]) {
+                                postId = match[1];
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!postId) {
+                        for (let a of links) {
+                            let href = a.href || '';
+                            let match = href.match(/(?:posts|permalink|videos|reel|story_fbid=|multi_permalinks=)[/=?]?([0-9]+)/);
+                            if (match && match[1]) {
+                                postId = match[1];
+                                if (!rawPostLink) rawPostLink = href;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Susun Canonical Permalink Format
+                    let rdidQuery = rdid ? `?rdid=${rdid}` : '';
+                    if (groupId && postId) {
+                        postUrl = `https://www.facebook.com/groups/${groupId}/permalink/${postId}/${rdidQuery}`;
+                    } else if (rawPostLink) {
+                        if (rawPostLink.includes('/reel/')) {
+                            let mR = rawPostLink.match(/\\/reel\\/([0-9]+)/);
+                            if (mR) postUrl = `https://www.facebook.com/reel/${mR[1]}/`;
+                        } else if (rawPostLink.includes('/posts/')) {
+                            let mUp = rawPostLink.match(/facebook\\.com\\/([^/?#]+)\\/posts\\/([0-9]+)/);
+                            if (mUp && !['groups', 'permalink.php', 'story.php'].includes(mUp[1].toLowerCase())) {
+                                postUrl = `https://www.facebook.com/${mUp[1]}/posts/${mUp[2]}/${rdidQuery}`;
+                            }
+                        }
+                        if (!postUrl) {
+                            postUrl = rawPostLink.split('?')[0];
+                            if (rdid) postUrl += rdidQuery;
                         }
                     }
 
@@ -1769,7 +1917,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
             }
 
             return null;
-        """, list(seen_signatures), list(seen_post_ids), list(seen_post_urls))
+        """, list(seen_signatures), list(seen_post_ids), list(seen_post_urls), group_name or '')
 
         # Jika belum ada postingan baru di layar, scroll feed pencarian ke bawah
         if not next_post:
@@ -1786,7 +1934,16 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
         p_profile_url = next_post.get('profile_url', '')
         p_text = next_post.get('post_text')
         p_date = next_post.get('post_date')
-        p_url = next_post.get('post_url')
+        raw_p_url = next_post.get('post_url')
+
+        # Standardisasi format URL Facebook ke canonical permalink (misal https://www.facebook.com/groups/.../permalink/.../)
+        p_url = format_facebook_url(
+            raw_url=raw_p_url,
+            current_page_url=driver.current_url,
+            post_id=p_id,
+            author=p_author,
+            group_name=group_name
+        )
         clean_url = p_url.split('?')[0].rstrip('/') if p_url else ''
         dom_idx = next_post.get('dom_index', 0)
         p_comments_count = next_post.get('comments_count', 0)
@@ -1833,6 +1990,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
         print("\n" + "=" * 65)
         com_info = f" ({p_comments_count} komentar)" if p_comments_count > 0 else ""
         print(f"[POST #{total_posts_saved}{target_str}] @{p_author} ({p_date}){com_info}")
+        print(f"  * URL  : {p_url}")
         print(f"  \"{p_text[:75]}...\"")
         print("  [*] LANGKAH 2: Klik Toggle Komentar...")
 
@@ -2015,7 +2173,7 @@ def run_live_interactive_sniffer():
                 is_rep = c.get('is_reply', 'TIDAK')
                 rep_to = c.get('reply_to', '')
                 rep_cnt = c.get('reply_count', 0)
-                current_url = driver.current_url
+                current_url = format_facebook_url(driver.current_url)
 
                 c_prof_url = c.get('profile_url', '')
                 c_username = c.get('username') or c_author

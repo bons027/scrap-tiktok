@@ -16,6 +16,7 @@ import threading
 import queue
 import glob
 import re
+import subprocess
 from datetime import datetime
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
@@ -212,6 +213,24 @@ def find_binary(filenames, subdirs):
                     return os.path.abspath(candidate)
     return None
 
+def get_chrome_major_version(chrome_path):
+    """
+    Mendeteksi versi utama (major version) dari file executable Chrome.
+    Contoh: '152.0.7977.75' -> 152
+    """
+    if not chrome_path or not os.path.exists(chrome_path):
+        return None
+    try:
+        cmd = f'(Get-Item "{chrome_path}").VersionInfo.ProductVersion'
+        res = subprocess.check_output(['powershell', '-NoProfile', '-Command', cmd], text=True).strip()
+        if res:
+            m = re.search(r'^(\d+)', res)
+            if m:
+                return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
 def get_driver(worker_id=0):
     """
     Inisialisasi browser undetected-chromedriver dengan profil terisolasi per worker.
@@ -219,6 +238,9 @@ def get_driver(worker_id=0):
     Worker 1..N menggunakan 'tiktok_chrome_profile_wN' dengan sinkronisasi sesi dari master.
     """
     chrome_path = find_binary(["chrome.exe"], ["chrome-win64", "chrome", ""])
+    driver_path = find_binary(["chromedriver.exe"], ["chromedriver-win64", "chromedriver", ""])
+    version_main = get_chrome_major_version(chrome_path)
+
     base_dir = os.path.dirname(os.path.abspath(__file__))
     master_profile = os.path.join(base_dir, "tiktok_chrome_profile")
     os.makedirs(master_profile, exist_ok=True)
@@ -250,6 +272,10 @@ def get_driver(worker_id=0):
     }
     if chrome_path:
         driver_kwargs["browser_executable_path"] = chrome_path
+    if driver_path:
+        driver_kwargs["driver_executable_path"] = driver_path
+    if version_main:
+        driver_kwargs["version_main"] = version_main
 
     driver = uc.Chrome(**driver_kwargs)
 

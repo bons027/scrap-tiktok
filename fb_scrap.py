@@ -11,6 +11,7 @@ import csv
 import os
 import random
 import re
+import subprocess
 import urllib.parse
 from datetime import datetime
 import undetected_chromedriver as uc
@@ -436,8 +437,30 @@ def find_binary(filenames, subdirs):
     return None
 
 
+def get_chrome_major_version(chrome_path):
+    """
+    Mendeteksi versi utama (major version) dari file executable Chrome.
+    Contoh: '152.0.7977.75' -> 152
+    """
+    if not chrome_path or not os.path.exists(chrome_path):
+        return None
+    try:
+        cmd = f'(Get-Item "{chrome_path}").VersionInfo.ProductVersion'
+        res = subprocess.check_output(['powershell', '-NoProfile', '-Command', cmd], text=True).strip()
+        if res:
+            m = re.search(r'^(\d+)', res)
+            if m:
+                return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
 def get_driver():
     chrome_path = find_binary(["chrome.exe"], ["chrome-win64", "chrome", ""])
+    driver_path = find_binary(["chromedriver.exe"], ["chromedriver-win64", "chromedriver", ""])
+    version_main = get_chrome_major_version(chrome_path)
+
     base_dir = os.path.dirname(os.path.abspath(__file__))
     profile_dir = os.path.join(base_dir, "facebook_chrome_profile")
     os.makedirs(profile_dir, exist_ok=True)
@@ -454,6 +477,10 @@ def get_driver():
     }
     if chrome_path:
         driver_kwargs["browser_executable_path"] = chrome_path
+    if driver_path:
+        driver_kwargs["driver_executable_path"] = driver_path
+    if version_main:
+        driver_kwargs["version_main"] = version_main
 
     driver = uc.Chrome(**driver_kwargs)
 

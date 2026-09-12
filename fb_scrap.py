@@ -339,20 +339,39 @@ def is_outdated_post(date_str, min_year=2025):
 def extract_comments_from_json_tree(obj, results=None, parent_author=None, is_reply=False):
     """
     Mengekstrak komentar dan deep replies dari struktur pohon GraphQL secara rekursif.
+    Mendukung berbagai variasi skema JSON Facebook modern (preferred_body, message, body, translation).
     """
     if results is None:
         results = []
 
     if isinstance(obj, dict):
-        if 'body' in obj and isinstance(obj['body'], dict) and 'text' in obj['body']:
+        # Ekstraksi teks komentar dari berbagai jalur skema GraphQL Facebook
+        text = ""
+        if 'preferred_body' in obj and isinstance(obj['preferred_body'], dict):
+            text = str(obj['preferred_body'].get('text', '')).strip()
+        elif 'body' in obj and isinstance(obj['body'], dict):
             text = str(obj['body'].get('text', '')).strip()
-            cid = str(obj.get('id', obj.get('legacy_token', '')))
+        elif 'message' in obj and isinstance(obj['message'], dict):
+            text = str(obj['message'].get('text', '')).strip()
+        elif 'comment_text' in obj and isinstance(obj['comment_text'], dict):
+            text = str(obj['comment_text'].get('text', '')).strip()
+        elif 'translation' in obj and isinstance(obj['translation'], dict):
+            text = str(obj['translation'].get('text', '')).strip()
+        elif obj.get('__typename') == 'Comment' and 'text' in obj:
+            text = str(obj.get('text', '')).strip()
 
+        cid = str(obj.get('id', obj.get('legacy_fbid', obj.get('legacy_token', ''))))
+
+        if text and is_valid_comment_text(text) and not text.startswith("http"):
             # Filter notifikasi ID & noise
-            if not cid.startswith('bm90aWZpY2F0aW9u') and 'notification' not in cid.lower() and is_valid_comment_text(text) and not text.startswith("http"):
+            if not cid.startswith('bm90aWZpY2F0aW9u') and 'notification' not in cid.lower():
                 author = 'Warga'
+                author_url = ''
+                uname = 'Warga'
                 if 'author' in obj and isinstance(obj['author'], dict):
                     author = obj['author'].get('name', 'Warga')
+                    author_url = obj['author'].get('url', '')
+                    uname = obj['author'].get('id') or author
                 elif 'comment_parent' in obj and isinstance(obj.get('comment_parent'), dict):
                     author = obj['comment_parent'].get('author', {}).get('name', 'Warga')
 
@@ -374,6 +393,8 @@ def extract_comments_from_json_tree(obj, results=None, parent_author=None, is_re
                         likes = react_cnt.get('count', 0)
                     elif isinstance(feedback.get('feedback_reaction_count'), int):
                         likes = feedback.get('feedback_reaction_count', 0)
+                    elif isinstance(feedback.get('reactors', {}), dict):
+                        likes = feedback['reactors'].get('count', 0)
 
                     # Deteksi reply count
                     if 'replies' in feedback and isinstance(feedback['replies'], dict):
@@ -395,6 +416,8 @@ def extract_comments_from_json_tree(obj, results=None, parent_author=None, is_re
                 results.append({
                     'comment_id': cid or f"fb_c_{abs(hash(text))}",
                     'author': author,
+                    'username': uname,
+                    'profile_url': author_url,
                     'comment_date': c_date,
                     'comment_text': text,
                     'likes': likes,
@@ -405,12 +428,12 @@ def extract_comments_from_json_tree(obj, results=None, parent_author=None, is_re
 
                 # Jika komentar ini memiliki node balasan di dalamnya, traverse dengan menandai is_reply=True
                 if 'feedback' in obj and isinstance(obj['feedback'], dict):
-                    sub_replies = obj['feedback'].get('replies', {})
-                    if isinstance(sub_replies, dict):
+                    sub_replies = obj['feedback'].get('replies', {}) or obj['feedback'].get('comment_rendering_instance', {})
+                    if isinstance(sub_replies, (dict, list)):
                         extract_comments_from_json_tree(sub_replies, results, parent_author=author, is_reply=True)
 
         for k, v in obj.items():
-            if k != 'feedback':  # hindari double traversal jika sudah diproses
+            if k not in ['feedback', 'comment_parent']:  # hindari double traversal jika sudah diproses
                 extract_comments_from_json_tree(v, results, parent_author=parent_author, is_reply=is_reply)
 
     elif isinstance(obj, list):
@@ -942,12 +965,20 @@ def extract_comments_from_active_container(driver):
                 return res.replace(/\\s+/g, ' ').trim();
             }
 
-            let commentElements = scope.querySelectorAll(
-                'div[role="article"], div[aria-label*="Komentar oleh"], div[aria-label*="Comment by"], div[aria-label*="Komentar"], div[aria-label*="Comment"], div[class*="x1y1aw1k"], ul > li'
-            );
+            let dialog = document.querySelector('div[role="dialog"]');
+            let scope = dialog || document;
+
+            let commentElements = [];
+            if (dialog) {
+                commentElements = Array.from(dialog.querySelectorAll('div[aria-label*="Komentar oleh" i], div[aria-label*="Comment by" i], div[role="article"], div[aria-label*="Komentar" i], div[aria-label*="Comment" i], div[aria-label*="Balasan" i], div[aria-label*="Reply" i], ul > li, div[class*="x1y1aw1k"]'));
+            } else {
+                commentElements = Array.from(document.querySelectorAll('div[aria-label*="Komentar oleh" i], div[aria-label*="Comment by" i], div[role="article"][aria-label*="Komentar" i], div[role="article"][aria-label*="Comment" i], div[role="article"][aria-label*="Balasan" i], div[role="article"][aria-label*="Reply" i], ul > li div[role="article"], ul > li div[class*="x1r8uery"], div[class*="x1y1aw1k"]'));
+            }
 
             commentElements.forEach((el, idx) => {
                 if (el.closest('[role="navigation"]') || el.closest('[aria-label*="Notifikasi"]')) return;
+                // Lewati jika elemen ini adalah kartu postingan utama feed
+                if (!dialog && el.matches('div[role="feed"] > div')) return;
 
                 let authorEl = el.querySelector('a span[dir="auto"], a strong, span > strong, strong, a[role="link"]');
                 let author = authorEl ? resolveText(authorEl).split('\\n')[0].trim() : 'Warga';

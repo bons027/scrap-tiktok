@@ -1351,10 +1351,90 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
 
             for (let idx = 0; idx < feedNodes.length; idx++) {
                 let p = feedNodes[idx];
-                let textEl = p.querySelector('div[dir="auto"], div[data-ad-preview="message"], div[id*="post_message"]');
-                let postText = textEl ? (textEl.innerText || '').trim() : '';
 
-                if (postText.length > 8 && !postText.toLowerCase().startsWith('hasil untuk') && !postText.toLowerCase().startsWith('menampilkan hasil')) {
+                // Helper cerdas & multi-layer untuk menarik caption/deskripsi postingan Facebook
+                function resolveFacebookPostCaption(card) {
+                    if (!card) return '';
+
+                    // 1. Otomatis klik tombol 'Lihat selengkapnya' / 'See more' agar caption lengkap tidak terpotong
+                    try {
+                        let seeMoreBtns = card.querySelectorAll('div[role="button"], span[role="button"]');
+                        for (let btn of seeMoreBtns) {
+                            let bTxt = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+                            if (bTxt === 'lihat selengkapnya' || bTxt === 'see more' || bTxt === 'baca selengkapnya' || bTxt === 'more' || bTxt === 'selengkapnya') {
+                                btn.click();
+                            }
+                        }
+                    } catch(e) {}
+
+                    // 2. Selector utama pesan/teks postingan Facebook Web & Comet
+                    let primarySelectors = [
+                        'div[data-ad-preview="message"]',
+                        'div[data-ad-comet-preview="message"]',
+                        'div[data-testid="post_message"]',
+                        'div[id*="post_message"]',
+                        'div[class*="userContent"]',
+                        'div.x1iorvi4',
+                        'div[dir="auto"][style*="text-align"]'
+                    ];
+
+                    for (let sel of primarySelectors) {
+                        let msgEl = card.querySelector(sel);
+                        if (msgEl) {
+                            let txt = (msgEl.innerText || msgEl.textContent || '').trim();
+                            if (txt.length > 3) {
+                                return txt;
+                            }
+                        }
+                    }
+
+                    // 3. Scan semua blok teks dir="auto" dengan memfilter header/author/tombol sistem
+                    let allBlocks = Array.from(card.querySelectorAll('div[dir="auto"], span[dir="auto"]'));
+                    let validCandidates = [];
+
+                    for (let b of allBlocks) {
+                        if (b.closest('div[role="button"], button, [aria-label*="Suka"], [aria-label*="Komentar"], [aria-label*="Bagikan"], [aria-label*="Like"], [aria-label*="Comment"]')) {
+                            continue;
+                        }
+                        if (b.closest('h2, h3, h4, [role="heading"]')) {
+                            continue;
+                        }
+                        let t = (b.innerText || b.textContent || '').trim();
+                        let tLower = t.toLowerCase();
+
+                        if (
+                            t.length < 5 ||
+                            tLower.startsWith('hasil untuk') ||
+                            tLower.startsWith('menampilkan hasil') ||
+                            tLower === 'suka' || tLower === 'komentar' || tLower === 'bagikan' ||
+                            tLower === 'like' || tLower === 'comment' || tLower === 'share' ||
+                            tLower.includes('grup publik') || tLower.includes('public group') ||
+                            tLower.includes('anggota') || tLower.includes('members') ||
+                            tLower === 'lihat selengkapnya' || tLower === 'see more' ||
+                            tLower.endsWith(' yang lalu') || tLower.endsWith(' ago')
+                        ) {
+                            continue;
+                        }
+                        validCandidates.push(t);
+                    }
+
+                    if (validCandidates.length > 0) {
+                        validCandidates.sort((a, b) => b.length - a.length);
+                        return validCandidates[0];
+                    }
+
+                    // 4. Fallback jika postingan berupa foto poster / infografis
+                    let img = card.querySelector('img[alt]');
+                    if (img && img.alt && img.alt.length > 15 && !img.alt.toLowerCase().includes('profil') && !img.alt.toLowerCase().includes('avatar')) {
+                        return '[Foto] ' + img.alt.trim();
+                    }
+
+                    return '';
+                }
+
+                let postText = resolveFacebookPostCaption(p);
+
+                if (postText.length > 3 && !postText.toLowerCase().startsWith('hasil untuk') && !postText.toLowerCase().startsWith('menampilkan hasil')) {
                     // Helper untuk membaca teks asli dari elemen HTML, termasuk SVG <use xlink:href="#Svg...">
                     function resolveElementTextWithSvg(element) {
                         if (!element) return '';

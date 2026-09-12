@@ -1202,7 +1202,15 @@ def run_scraper():
                                         followers_count = author_stats.get('followerCount', 0)
                                         following_count = author_stats.get('followingCount', 0)
 
-                                        desc = vid_obj.get('desc', '') or ""
+                                        desc = (
+                                            vid_obj.get('desc') or
+                                            vid_obj.get('title') or
+                                            vid_obj.get('caption') or
+                                            (vid_obj.get('contents', [{}])[0].get('desc') if isinstance(vid_obj.get('contents'), list) and vid_obj.get('contents') else '') or
+                                            (vid_obj.get('share_info', {}).get('share_desc') if isinstance(vid_obj.get('share_info'), dict) else '') or
+                                            (vid_obj.get('share_info', {}).get('share_title') if isinstance(vid_obj.get('share_info'), dict) else '') or
+                                            ""
+                                        ).strip()
                                         stats = vid_obj.get('stats', {}) or vid_obj.get('statsV2', {}) or {}
                                         
                                         likes = stats.get('diggCount', 0)
@@ -1302,19 +1310,51 @@ def run_scraper():
                         dom_vids = driver_master.execute_script("""
                             let results = [];
                             let cards = document.querySelectorAll(
-                                'div[data-e2e="search_top-item"], div[data-e2e="search_video-item"], div[class*="DivItemContainer"], [data-e2e="search-card-container"], div[class*="DivVideoCardContainer"]'
+                                'div[data-e2e="search_top-item"], div[data-e2e="search_video-item"], div[class*="DivItemContainer"], [data-e2e="search-card-container"], div[class*="DivVideoCardContainer"], div[class*="DivItemContainerV2"], [data-e2e="search-common-link"]'
                             );
                             for (let c of cards) {
-                                let link = c.querySelector('a[href*="/video/"]');
+                                let link = c.querySelector('a[href*="/video/"]') || (c.tagName === 'A' && c.href && c.href.includes('/video/') ? c : null);
                                 if (link && link.href) {
                                     let href = link.href;
                                     let vid_id = href.includes('/video/') ? href.split('/video/')[1].split('?')[0].split('/')[0] : '';
-                                    let authorEl = c.querySelector('a[href*="/@"], [data-e2e="search-card-user-unique-id"], [data-e2e="search-card-user-link"]');
+                                    let authorEl = c.querySelector('a[href*="/@"], [data-e2e="search-card-user-unique-id"], [data-e2e="search-card-user-link"], [data-e2e="search-card-user-name"]');
                                     let author = authorEl ? (authorEl.innerText || '').trim() : 'Unknown';
                                     let authorUrl = authorEl ? (authorEl.href || '') : '';
-                                    let descEl = c.querySelector('[data-e2e="search-card-video-caption"], [class*="DivVideoDesc"], [class*="PVideoDesc"]');
-                                    let desc = descEl ? (descEl.innerText || '').trim() : '';
-                                    let playsEl = c.querySelector('[data-e2e="video-views"], [class*="video-count"]');
+
+                                    // Multi-layer selector untuk ekstraksi caption/deskripsi postingan TikTok
+                                    let desc = '';
+                                    let descSelectors = [
+                                        '[data-e2e="search-card-video-caption"]',
+                                        '[data-e2e="search-card-desc"]',
+                                        '[data-e2e="search_card_desc"]',
+                                        '[data-e2e="video-desc"]',
+                                        '[data-e2e="browse-video-desc"]',
+                                        '[class*="DivVideoDesc"]',
+                                        '[class*="PVideoDesc"]',
+                                        '[class*="DivTextContainer"]',
+                                        '[class*="SpanText"]',
+                                        '[class*="video-desc"]',
+                                        'h1'
+                                    ];
+                                    for (let sel of descSelectors) {
+                                        let el = c.querySelector(sel);
+                                        if (el) {
+                                            let txt = (el.innerText || el.textContent || '').trim();
+                                            if (txt.length > 0) { desc = txt; break; }
+                                        }
+                                    }
+                                    if (!desc) {
+                                        let titleAttr = link.getAttribute('title') || c.getAttribute('aria-label') || '';
+                                        if (titleAttr && titleAttr.length > 3) desc = titleAttr.trim();
+                                    }
+                                    if (!desc) {
+                                        let imgEl = c.querySelector('img[alt]');
+                                        if (imgEl && imgEl.alt && !imgEl.alt.toLowerCase().includes('avatar') && !imgEl.alt.toLowerCase().includes('profile')) {
+                                            desc = imgEl.alt.trim();
+                                        }
+                                    }
+
+                                    let playsEl = c.querySelector('[data-e2e="video-views"], [class*="video-count"], [class*="play-count"]');
                                     let playsTxt = playsEl ? (playsEl.innerText || '').trim() : '0';
                                     let musicEl = c.querySelector('a[href*="/music/"], [data-e2e="search-card-music"]');
                                     let musicTxt = musicEl ? (musicEl.innerText || '').trim() : '';

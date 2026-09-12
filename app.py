@@ -40,12 +40,22 @@ def find_csv_path(filename):
         return None
     if os.path.isabs(filename) and os.path.exists(filename):
         return filename
-    results_path = os.path.join(BASE_DIR, "results", filename)
-    if os.path.exists(results_path):
-        return results_path
+    # Cek path langsung di BASE_DIR
     base_path = os.path.join(BASE_DIR, filename)
     if os.path.exists(base_path):
         return base_path
+    # Cek di results/{filename}
+    results_path = os.path.join(BASE_DIR, "results", filename)
+    if os.path.exists(results_path):
+        return results_path
+    # Cek recursive di subfolder harian results/ (contoh: results/11-9/filename atau results/**/filename)
+    basename = os.path.basename(filename)
+    for p in glob.glob(os.path.join(BASE_DIR, "results", "**", basename), recursive=True):
+        if os.path.exists(p) and os.path.isfile(p):
+            return p
+    for p in glob.glob(os.path.join(BASE_DIR, "**", basename), recursive=True):
+        if os.path.exists(p) and p.endswith(".csv"):
+            return p
     return results_path if os.path.exists(results_path) else base_path
 
 def normalize_sentiment(val):
@@ -171,26 +181,53 @@ class AppHandler(BaseHTTPRequestHandler):
             seen_files = set()
             search_patterns = [
                 os.path.join(BASE_DIR, "*.csv"),
-                os.path.join(BASE_DIR, "results", "*.csv")
+                os.path.join(BASE_DIR, "results", "*.csv"),
+                os.path.join(BASE_DIR, "results", "*", "*.csv"),
+                os.path.join(BASE_DIR, "results", "**", "*.csv"),
             ]
+            all_csvs = []
             for pat in search_patterns:
-                for f in glob.glob(pat):
-                    fname = os.path.basename(f)
-                    if fname.startswith(".") or fname in seen_files:
-                        continue
-                    seen_files.add(fname)
-                    try:
-                        sample = pd.read_csv(f, nrows=2)
-                        has_analysis = any(c in sample.columns for c in ["sentiment", "sentiment_score", "sentiment_analysis_result", "label"])
-                    except Exception:
-                        has_analysis = False
-                    files.append({
-                        "filename": fname,
-                        "is_analyzed": has_analysis,
-                        "has_summary": os.path.exists(f.replace(".csv", "_summary.txt"))
-                    })
-            # Urutkan agar file yang sudah dianalisis berada di paling atas
-            files.sort(key=lambda x: (not x["is_analyzed"], x["filename"]))
+                all_csvs.extend(glob.glob(pat, recursive=True))
+
+            for f in all_csvs:
+                if not os.path.isfile(f):
+                    continue
+                rel_path = os.path.relpath(f, BASE_DIR).replace("\\", "/")
+                fname = os.path.basename(f)
+                if fname.startswith("."):
+                    continue
+                if rel_path in seen_files:
+                    continue
+                seen_files.add(rel_path)
+
+                try:
+                    sample = pd.read_csv(f, nrows=2)
+                    has_analysis = any(c in sample.columns for c in ["sentiment", "sentiment_score", "sentiment_analysis_result", "label"])
+                except Exception:
+                    has_analysis = False
+
+                # Ekstrak nama folder (misal: "11-9" dari "results/11-9/file.csv")
+                folder_name = ""
+                parts = rel_path.split("/")
+                if len(parts) >= 3 and parts[0] == "results":
+                    folder_name = parts[1]
+                elif len(parts) == 2 and parts[0] == "results":
+                    folder_name = "results"
+                else:
+                    folder_name = "root"
+
+                display_name = f"[{folder_name}] {fname}" if folder_name not in ["", "root", "results"] else fname
+
+                files.append({
+                    "filename": rel_path,
+                    "display_name": display_name,
+                    "folder": folder_name,
+                    "is_analyzed": has_analysis,
+                    "has_summary": os.path.exists(f.replace(".csv", "_summary.txt")),
+                    "mtime": os.path.getmtime(f)
+                })
+            # Urutkan berdasarkan waktu modifikasi terbaru dan status analisis
+            files.sort(key=lambda x: (not x["is_analyzed"], -x["mtime"]))
             self.send_json({"files": files})
             return
 

@@ -67,7 +67,8 @@ async function loadFileList(preferredFile = null) {
         files.forEach(f => {
             const opt = document.createElement("option");
             opt.value = f.filename;
-            opt.textContent = `${f.filename} ${f.is_analyzed ? "✨ (Sudah Dianalisis)" : ""}`;
+            const label = f.display_name || f.filename;
+            opt.textContent = `${label} ${f.is_analyzed ? "✨ (Sudah Dianalisis)" : ""}`;
             selectFile.appendChild(opt);
         });
 

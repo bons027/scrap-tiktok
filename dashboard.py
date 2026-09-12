@@ -92,11 +92,25 @@ COLOR_MAP = {
 # ==========================================
 st.sidebar.title("⚙️ Kontrol & Data")
 
-# Deteksi file CSV yang ada di direktori root dan results/
-csv_files = glob.glob("*.csv") + glob.glob("results/*.csv")
+# Deteksi file CSV yang ada di direktori root dan seluruh subfolder results/
+csv_files = (
+    glob.glob("*.csv") +
+    glob.glob("results/*.csv") +
+    glob.glob("results/*/*.csv") +
+    glob.glob("results/**/*.csv", recursive=True)
+)
 # Urutkan berdasarkan waktu modifikasi terbaru
 csv_files = sorted(list(set(csv_files)), key=lambda x: os.path.getmtime(x) if os.path.exists(x) else 0, reverse=True)
-available_files = csv_files
+available_files = [f for f in csv_files if os.path.isfile(f)]
+
+def format_file_label(fpath):
+    parts = fpath.replace("\\", "/").split("/")
+    fname = os.path.basename(fpath)
+    if len(parts) >= 3 and parts[0] == "results":
+        return f"[{parts[1]}] {fname}"
+    elif len(parts) == 2 and parts[0] == "results":
+        return f"[results] {fname}"
+    return fname
 
 if not available_files:
     st.sidebar.warning("Tidak ditemukan file CSV di folder ini. Silakan jalankan scraper terlebih dahulu.")
@@ -108,7 +122,7 @@ else:
         if "_analyzed" in f:
             default_idx = i
             break
-    selected_file = st.sidebar.selectbox("Pilih File Komentar CSV:", available_files, index=default_idx)
+    selected_file = st.sidebar.selectbox("Pilih File Komentar CSV:", available_files, index=default_idx, format_func=format_file_label)
 
 # Input Gemini API Key
 env_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""

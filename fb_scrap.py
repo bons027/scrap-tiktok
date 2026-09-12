@@ -577,11 +577,12 @@ def load_all_existing_sheet_data(current_post_csv, current_comment_csv):
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     
-    # Scan folder results/
+    # Scan folder results/ dan subfolder harian
     if os.path.exists(RESULTS_DIR):
-        for f in os.listdir(RESULTS_DIR):
-            if f.endswith(".csv"):
-                files_to_check.add(os.path.join(RESULTS_DIR, f))
+        for root_dir, _, fnames in os.walk(RESULTS_DIR):
+            for f in fnames:
+                if f.endswith(".csv"):
+                    files_to_check.add(os.path.join(root_dir, f))
 
     # Scan root directory for relevant CSV files
     for f in os.listdir(base_dir):
@@ -1100,6 +1101,19 @@ def exhaustively_scroll_and_extract_comments(driver, max_idle_scrolls=3, max_tot
 
 
 # Folder output default untuk menyimpan seluruh file CSV hasil scraping
+def get_daily_results_dir():
+    """
+    Mengembalikan path folder hasil harian di dalam results/
+    Format: results/{hari}-{bulan} (contoh: results/11-9 atau results/9-10)
+    Folder dibuat otomatis jika belum ada.
+    """
+    now = datetime.now()
+    daily_folder = f"{now.day}-{now.month}"
+    daily_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", daily_folder)
+    os.makedirs(daily_path, exist_ok=True)
+    return daily_path
+
+
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -1120,8 +1134,9 @@ def get_output_csv_paths(base_output_name):
         post_csv = os.path.join(dir_name, f"{base_file}_{timestamp}_posts.csv")
         comment_csv = os.path.join(dir_name, f"{base_file}_{timestamp}_comments.csv")
     else:
-        post_csv = os.path.join(RESULTS_DIR, f"{base_with_time}_posts.csv")
-        comment_csv = os.path.join(RESULTS_DIR, f"{base_with_time}_comments.csv")
+        daily_dir = get_daily_results_dir()
+        post_csv = os.path.join(daily_dir, f"{base_with_time}_posts.csv")
+        comment_csv = os.path.join(daily_dir, f"{base_with_time}_comments.csv")
     return post_csv, comment_csv
 
 
@@ -1852,7 +1867,8 @@ def run_live_interactive_sniffer():
         base_name = base_name[:-4]
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    comment_csv = os.path.join(RESULTS_DIR, f"{base_name}_{timestamp}_comments.csv")
+    daily_dir = get_daily_results_dir()
+    comment_csv = os.path.join(daily_dir, f"{base_name}_{timestamp}_comments.csv")
     init_comments_csv(comment_csv)
     print(f"[*] Komentar & balasan akan otomatis disimpan ke: {comment_csv}")
 

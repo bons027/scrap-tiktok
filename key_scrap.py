@@ -28,6 +28,18 @@ from selenium.webdriver.common.action_chains import ActionChains
 uc.Chrome.__del__ = lambda self: None
 
 # Folder output default untuk menyimpan seluruh file CSV hasil scraping
+def get_daily_results_dir():
+    """
+    Mengembalikan path folder hasil harian di dalam results/
+    Format: results/{hari}-{bulan} (contoh: results/11-9 atau results/9-10)
+    Folder dibuat otomatis jika belum ada.
+    """
+    now = datetime.now()
+    daily_folder = f"{now.day}-{now.month}"
+    daily_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", daily_folder)
+    os.makedirs(daily_path, exist_ok=True)
+    return daily_path
+
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -538,8 +550,9 @@ def get_output_csv_paths(base_output_name):
         video_csv = os.path.join(dir_name, f"{base_file}_{timestamp}.csv")
         comment_csv = os.path.join(dir_name, f"{base_file}_{timestamp}_comments.csv")
     else:
-        video_csv = os.path.join(RESULTS_DIR, f"{base_with_time}.csv")
-        comment_csv = os.path.join(RESULTS_DIR, f"{base_with_time}_comments.csv")
+        daily_dir = get_daily_results_dir()
+        video_csv = os.path.join(daily_dir, f"{base_with_time}.csv")
+        comment_csv = os.path.join(daily_dir, f"{base_with_time}_comments.csv")
     return video_csv, comment_csv
 
 def load_keywords(filepath="keywords.txt"):
@@ -668,8 +681,13 @@ def load_videos_from_csv(csv_path, min_year=2025):
         if os.path.exists(cand):
             csv_path = cand
         else:
-            print(f"[ERROR] File {csv_path} tidak ditemukan!")
-            return []
+            # Cari recursive di subfolder harian results/
+            matched = glob.glob(os.path.join(RESULTS_DIR, "**", os.path.basename(csv_path)), recursive=True)
+            if matched and os.path.exists(matched[0]):
+                csv_path = matched[0]
+            else:
+                print(f"[ERROR] File {csv_path} tidak ditemukan!")
+                return []
 
     videos = []
     seen_ids = set()
@@ -1022,9 +1040,10 @@ def run_scraper():
                     max_videos_for_comments = 30
 
     elif mode == "3":
-        # Temukan file-file CSV video yang ada di results/ atau root
+        # Temukan file-file CSV video yang ada di results/ (termasuk subfolder harian) atau root
         found_csvs = [
-            os.path.basename(f) for f in glob.glob(os.path.join(RESULTS_DIR, "*.csv")) + glob.glob("*.csv")
+            os.path.relpath(f, RESULTS_DIR) if f.startswith(RESULTS_DIR) else os.path.basename(f)
+            for f in glob.glob(os.path.join(RESULTS_DIR, "**", "*.csv"), recursive=True) + glob.glob("*.csv")
             if not f.endswith("_comments.csv") and not f.endswith("_posts.csv")
         ]
         default_csv = found_csvs[0] if found_csvs else "data_tiktok.csv"

@@ -20,6 +20,19 @@ import requests
 from bs4 import BeautifulSoup
 
 # Folder output default untuk menyimpan seluruh file CSV hasil scraping
+def get_daily_results_dir():
+    """
+    Mengembalikan path folder hasil harian di dalam results/
+    Format: results/{hari}-{bulan} (contoh: results/11-9 atau results/9-10)
+    Folder dibuat otomatis jika belum ada.
+    """
+    now = datetime.now()
+    daily_folder = f"{now.day}-{now.month}"
+    daily_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", daily_folder)
+    os.makedirs(daily_path, exist_ok=True)
+    return daily_path
+
+
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -751,8 +764,9 @@ def run_news_scraper(keywords, output_name, source_mode="all", max_articles_per_
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_output_name = re.sub(r'[\\/*?:"<>| ]', '_', output_name.strip())
     
-    posts_csv_path = os.path.join(RESULTS_DIR, f"{safe_output_name}_{timestamp}_posts.csv")
-    comments_csv_path = os.path.join(RESULTS_DIR, f"{safe_output_name}_{timestamp}_comments.csv")
+    daily_dir = get_daily_results_dir()
+    posts_csv_path = os.path.join(daily_dir, f"{safe_output_name}_{timestamp}_posts.csv")
+    comments_csv_path = os.path.join(daily_dir, f"{safe_output_name}_{timestamp}_comments.csv")
 
     # Inisialisasi CSV Komentar
     init_comments_csv(comments_csv_path)

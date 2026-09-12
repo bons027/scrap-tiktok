@@ -580,29 +580,16 @@ def detect_language(text):
 
 def format_facebook_url(raw_url="", current_page_url="", post_id="", author="", group_name=""):
     """
-    Memformat URL postingan Facebook secara standar & konsisten sesuai format canonical permalink:
-    - Postingan Grup: https://www.facebook.com/groups/{group_id}/permalink/{post_id}/ (atau ?rdid=... jika ada)
+    Memformat URL postingan Facebook secara standar & konsisten sesuai format canonical direct post:
+    - Postingan Grup: https://www.facebook.com/groups/{group_id}/posts/{post_id} (menembak langsung ke postingan grup)
     - Postingan Reel: https://www.facebook.com/reel/{reel_id}/
-    - Postingan User/Page: https://www.facebook.com/{author_username}/posts/{post_id}/
+    - Postingan User/Page: https://www.facebook.com/{author_username}/posts/{post_id}
     """
     raw_url = (raw_url or '').strip()
     current_page_url = (current_page_url or '').strip()
     post_id = str(post_id or '').strip()
 
-    rdid = ''
-    # Ekstraksi rdid jika ada di raw_url atau current_page_url
-    if 'rdid=' in raw_url:
-        m_rd = re.search(r'[?&]rdid=([a-zA-Z0-9_-]+)', raw_url)
-        if m_rd:
-            rdid = m_rd.group(1)
-    elif 'rdid=' in current_page_url:
-        m_rd = re.search(r'[?&]rdid=([a-zA-Z0-9_-]+)', current_page_url)
-        if m_rd:
-            rdid = m_rd.group(1)
-
-    rdid_suffix = f"?rdid={rdid}" if rdid else ""
-
-    # 1. Cari group_id / group_slug
+    # 1. Ekstraksi group_id / group_slug dari raw_url, current_page_url, atau group_name
     group_id = ''
     m_grp = re.search(r'facebook\.com/groups/([^/?#]+)', raw_url)
     if m_grp and m_grp.group(1).lower() not in ['search', 'feed', 'joins', 'create', 'discover']:
@@ -616,30 +603,43 @@ def format_facebook_url(raw_url="", current_page_url="", post_id="", author="", 
     if not group_id and group_name:
         group_id = str(group_name).strip()
 
+    # Cek apakah raw_url atau current_page_url memuat id=group_id
+    if not group_id:
+        m_id = re.search(r'[?&]id=([0-9]+)', raw_url) or re.search(r'[?&]id=([0-9]+)', current_page_url)
+        if m_id:
+            group_id = m_id.group(1)
+
     # 2. Cari post_id jika belum ada
     extracted_post_id = post_id
+    if not extracted_post_id:
+        m_grp_post = re.search(r'/groups/[^/?#]+/(?:user/[^/?#]+/)?posts/([0-9]+)', raw_url)
+        if m_grp_post:
+            extracted_post_id = m_grp_post.group(1)
+
     if not extracted_post_id:
         m_fbid = re.search(r'[?&](?:story_fbid|multi_permalinks|fbid)=([0-9]+)', raw_url)
         if m_fbid:
             extracted_post_id = m_fbid.group(1)
-        if not extracted_post_id:
-            m_pid = re.search(r'/(?:posts|permalink|videos|reel)/([0-9]+)', raw_url)
-            if m_pid:
-                extracted_post_id = m_pid.group(1)
-        if not extracted_post_id:
-            m_set = re.search(r'set=(?:gm|pcb)\.([0-9]+)', raw_url)
-            if m_set:
-                extracted_post_id = m_set.group(1)
 
-    # Cek apakah story_fbid memiliki id=group_id
-    if not group_id and ('story_fbid=' in raw_url or 'multi_permalinks=' in raw_url):
-        m_id = re.search(r'[?&]id=([0-9]+)', raw_url)
-        if m_id:
-            group_id = m_id.group(1)
+    if not extracted_post_id:
+        m_pid = re.search(r'/(?:posts|permalink|videos|reel)/([0-9]+)', raw_url)
+        if m_pid:
+            extracted_post_id = m_pid.group(1)
 
-    # 3. Format Permalink Grup (Format canonical utama)
-    if group_id and extracted_post_id:
-        return f"https://www.facebook.com/groups/{group_id}/permalink/{extracted_post_id}/{rdid_suffix}"
+    if not extracted_post_id:
+        m_set = re.search(r'set=(?:gm|pcb)\.([0-9]+)', raw_url)
+        if m_set:
+            extracted_post_id = m_set.group(1)
+
+    # Jika post_id sama persis dengan group_id, cari id lain dalam URL
+    if extracted_post_id and group_id and str(extracted_post_id) == str(group_id):
+        m_other = re.search(r'(?:multi_permalinks|story_fbid|posts|permalink)[/=?%3D]?([0-9]{8,25})', raw_url)
+        if m_other and m_other.group(1) != str(group_id):
+            extracted_post_id = m_other.group(1)
+
+    # 3. Format Post Grup (Format canonical utama: https://www.facebook.com/groups/{group_id}/posts/{post_id})
+    if group_id and extracted_post_id and str(extracted_post_id) != str(group_id):
+        return f"https://www.facebook.com/groups/{group_id}/posts/{extracted_post_id}"
 
     # 4. Format Reel / Video
     if '/reel/' in raw_url or (extracted_post_id and '/reel/' in (raw_url or current_page_url)):
@@ -650,13 +650,13 @@ def format_facebook_url(raw_url="", current_page_url="", post_id="", author="", 
     # 5. Format User / Halaman Post
     m_user_post = re.search(r'facebook\.com/([^/?#]+)/posts/([0-9]+)', raw_url)
     if m_user_post and m_user_post.group(1).lower() not in ['groups', 'permalink.php', 'story.php']:
-        return f"https://www.facebook.com/{m_user_post.group(1)}/posts/{m_user_post.group(2)}/{rdid_suffix}"
+        return f"https://www.facebook.com/{m_user_post.group(1)}/posts/{m_user_post.group(2)}"
 
     # 6. Jika ada author dan post_id
     if extracted_post_id and author and author != 'Warga':
         author_slug = re.sub(r'[^a-zA-Z0-9.]', '', author.lower())
         if author_slug and len(author_slug) >= 3:
-            return f"https://www.facebook.com/{author_slug}/posts/{extracted_post_id}/{rdid_suffix}"
+            return f"https://www.facebook.com/{author_slug}/posts/{extracted_post_id}"
 
     if raw_url and not raw_url.startswith('https://www.facebook.com/search/'):
         return raw_url
@@ -1707,10 +1707,10 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                         }
                     }
 
-                    // Susun Canonical Permalink Format
+                    // Susun Canonical Direct Post Format
                     let rdidQuery = rdid ? `?rdid=${rdid}` : '';
                     if (groupId && postId && postId !== groupId) {
-                        postUrl = `https://www.facebook.com/groups/${groupId}/permalink/${postId}/${rdidQuery}`;
+                        postUrl = `https://www.facebook.com/groups/${groupId}/posts/${postId}`;
                     } else if (rawPostLink) {
                         if (rawPostLink.includes('/reel/')) {
                             let mR = rawPostLink.match(/\\/reel\\/([0-9]+)/);
@@ -1718,12 +1718,11 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                         } else if (rawPostLink.includes('/posts/')) {
                             let mUp = rawPostLink.match(/facebook\\.com\\/([^/?#]+)\\/posts\\/([0-9]+)/);
                             if (mUp && !['groups', 'permalink.php', 'story.php'].includes(mUp[1].toLowerCase())) {
-                                postUrl = `https://www.facebook.com/${mUp[1]}/posts/${mUp[2]}/${rdidQuery}`;
+                                postUrl = `https://www.facebook.com/${mUp[1]}/posts/${mUp[2]}`;
                             }
                         }
                         if (!postUrl) {
                             postUrl = rawPostLink.split('?')[0];
-                            if (rdid) postUrl += rdidQuery;
                         }
                     }
 
@@ -2020,24 +2019,15 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
         p_hashtags = extract_hashtags(p_text)
         p_lang = detect_language(p_text)
 
-        # Simpan metadata postingan (25 kolom standar konsisten)
-        save_to_csv(post_csv, [
-            "Facebook", csv_keyword_label, p_id, p_date, p_author,
-            p_profile_url, "", 0, 0, "",
-            "", p_text, p_reactions_count, p_shares_count, p_plays_count,
-            p_comments_count, "", p_lang, p_hashtags,
-            p_is_ad, p_is_pinned, p_is_sponsored, p_location, p_music_meta, p_url
-        ])
-
         target_str = f"/{max_posts}" if max_posts > 0 else ""
         print("\n" + "=" * 65)
         com_info = f" ({p_comments_count} komentar)" if p_comments_count > 0 else ""
         print(f"[POST #{total_posts_saved}{target_str}] @{p_author} ({p_date}){com_info}")
-        print(f"  * URL  : {p_url}")
+        print(f"  * URL Awal: {p_url}")
         print(f"  \"{p_text[:75]}...\"")
-        print("  [*] LANGKAH 2: Klik Toggle Komentar...")
+        print("  [*] LANGKAH 2: Klik Postingan & Buka Dialog Komentar...")
 
-        # LANGKAH 2: KLIK TOGGLE KOMENTAR PADA POSTINGAN TERSEBUT SECARA PRESISI (HINDARI PERMALINK LINK)
+        # LANGKAH 2: KLIK TOGGLE KOMENTAR / POSTINGAN TERSEBUT SECARA PRESISI
         driver.execute_script("""
             let targetIdx = arguments[0];
             let feedNodes = document.querySelectorAll('div[role="feed"] > div, div[role="article"], div[data-ad-preview="message"], div[class*="x1yztbdb"]');
@@ -2119,6 +2109,52 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                 try { textEl.click(); return; } catch(e) {}
             }
         """, dom_idx)
+
+        pause_ctrl.sleep(random.uniform(0.4, 0.7))
+
+        # Ekstraksi URL langsung dari browser / dialog yang baru saja terbuka saat postingan diklik
+        try:
+            active_info = driver.execute_script("""
+                let cur = window.location.href || '';
+                let dialog = document.querySelector('div[role="dialog"], div[aria-modal="true"]');
+                let foundLink = '';
+                if (dialog) {
+                    let dLinks = dialog.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"], a[href*="multi_permalinks"], a[href*="story_fbid="]');
+                    for (let dl of dLinks) {
+                        let h = dl.href || '';
+                        if (h && !h.includes('/search/') && !h.includes('/search?')) {
+                            foundLink = h;
+                            break;
+                        }
+                    }
+                }
+                return { current_url: cur, dialog_link: foundLink };
+            """)
+            if active_info:
+                cand_link = active_info.get('dialog_link') or active_info.get('current_url') or ''
+                if cand_link and not cand_link.startswith('https://www.facebook.com/search/'):
+                    refined_p_url = format_facebook_url(
+                        raw_url=cand_link,
+                        current_page_url=driver.current_url,
+                        post_id=p_id,
+                        author=p_author,
+                        group_name=group_name
+                    )
+                    if refined_p_url and not refined_p_url.startswith('https://www.facebook.com/search/'):
+                        p_url = refined_p_url
+        except Exception:
+            pass
+
+        print(f"  * URL Postingan: {p_url}")
+
+        # Simpan metadata postingan (25 kolom standar konsisten dengan URL direct post yang presisi)
+        save_to_csv(post_csv, [
+            "Facebook", csv_keyword_label, p_id, p_date, p_author,
+            p_profile_url, "", 0, 0, "",
+            "", p_text, p_reactions_count, p_shares_count, p_plays_count,
+            p_comments_count, "", p_lang, p_hashtags,
+            p_is_ad, p_is_pinned, p_is_sponsored, p_location, p_music_meta, p_url
+        ])
 
         pause_ctrl.sleep(random.uniform(0.4, 0.7))
 

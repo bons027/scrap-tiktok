@@ -1,0 +1,21 @@
+# ==============================================================================
+# DAFTAR TARGET MONITORING GRUP FACEBOOK (BATCH 2)
+# ==============================================================================
+# Petunjuk:
+# 1. Masukkan 1 tautan / link grup Facebook per baris di bawah ini.
+#    Contoh: https://www.facebook.com/groups/namagrup atau https://www.facebook.com/groups/123456789/
+# 2. Baris yang diawali tanda '#' akan diabaikan (dilewati) oleh scraper.
+# 3. Anda bebas menambahkan sebanyak mungkin link grup yang diinginkan.
+# ==============================================================================
+
+# Tambahkan link grup baru Anda di bawah ini:
+https://www.facebook.com/groups/1967407566855952/
+https://www.facebook.com/groups/bisniswargaklaten/
+https://www.facebook.com/groups/285518739486293/
+https://www.facebook.com/groups/1330232950442065/
+https://www.facebook.com/groups/1023123617759980/
+https://www.facebook.com/groups/257955008888830/
+https://www.facebook.com/groups/129566467559445/
+https://www.facebook.com/groups/471449435972828/
+https://www.facebook.com/groups/318531488207677/
+https://www.facebook.com/groups/601046828097110/

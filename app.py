@@ -19,7 +19,7 @@ except Exception:
     pass
 
 load_dotenv()
-from analyzer import analyze_comments_df, generate_executive_summary, get_gemini_client
+from analyzer import analyze_comments_df, generate_executive_summary, get_gemini_client, analyze_sentiment_fast
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PORT = 5000

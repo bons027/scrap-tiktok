@@ -1,0 +1,8 @@
+# Masukkan username atau link profil TikTok yang ingin di-scrape (satu per baris)
+# Contoh format:
+# @kemendagri
+# https://www.tiktok.com/@presiden.ri
+# pemprov_jatim
+
+@hamenangofficial
+

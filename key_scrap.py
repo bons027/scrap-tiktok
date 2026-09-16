@@ -716,8 +716,29 @@ def load_videos_from_csv(csv_path, min_year=2025):
             if matched and os.path.exists(matched[0]):
                 csv_path = matched[0]
             else:
-                print(f"[ERROR] File {csv_path} tidak ditemukan!")
-                return []
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                candidates = [
+                    os.path.join(base_dir, csv_path),
+                    os.path.join(os.path.dirname(base_dir), csv_path),
+                    os.path.join(os.path.expanduser("~"), "Downloads", csv_path)
+                ]
+                if os.path.basename(csv_path).startswith("dd"):
+                    clean_d = os.path.basename(csv_path)[1:]
+                    candidates.extend([
+                        os.path.join(RESULTS_DIR, clean_d),
+                        os.path.join(base_dir, clean_d),
+                        os.path.join(os.path.dirname(base_dir), clean_d),
+                        os.path.join(os.path.expanduser("~"), "Downloads", clean_d)
+                    ])
+                found = False
+                for c in candidates:
+                    if os.path.exists(c):
+                        csv_path = c
+                        found = True
+                        break
+                if not found:
+                    print(f"[ERROR] File {csv_path} tidak ditemukan!")
+                    return []
 
     videos = []
     seen_ids = set()
@@ -735,6 +756,11 @@ def load_videos_from_csv(csv_path, min_year=2025):
             # Filter tahun jika tanggal terdeteksi lebih usang dari min_year
             if u_date and is_outdated_post(u_date, min_year=min_year):
                 continue
+
+            if (not vid_id or vid_id.lower() == 'none') and vid_url:
+                match = re.search(r'/video/(\d+)', vid_url)
+                if match:
+                    vid_id = match.group(1)
 
             # Hindari duplikasi ID video saat memuat CSV
             if vid_id and vid_url and vid_id.lower() != 'none' and vid_id not in seen_ids:

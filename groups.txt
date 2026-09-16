@@ -66,4 +66,4 @@ https://www.facebook.com/groups/1682958352072076/
 # Hapus tanda '#' di bawah jika suatu saat grup ini ingin di-scrape:
 # ------------------------------------------------------------------------------
 # 6. ISK Info Seputar Klaten (Est. 198.800 Anggota) [NON AKTIF]
- https://www.facebook.com/groups/632467115169881/
+# https://www.facebook.com/groups/632467115169881/

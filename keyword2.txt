@@ -3,15 +3,9 @@
 # - Pencarian Frasa Persis (contoh: "bupati klaten"): Kata harus berurutan persis sama.
 # Baris yang diawali dengan '#' akan diabaikan
 Hamenang
-Hamenang Wajar Ismoyo
-Mas Menang
-Bupati Klaten Hamenang
-Pak Menang
-Jalan Rusak Klaten
-Bansos Klaten
-BLT Klaten
-Desil Klaten
-MBG Klaten
-BKK Klaten
+BKK
+Jalan Rusak
+Desil
+mbg klaten
+PKH 
 TPA Troketon
-Pupuk Langka Klaten

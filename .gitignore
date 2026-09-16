@@ -47,12 +47,16 @@ ENV/
 
 # Scraper Profiles & Sessions (Sensitive Login Data)
 tiktok_chrome_profile/
+tiktok_chrome_profile*/
 facebook_chrome_profile/
+facebook_chrome_profile*/
 *.pkl
 
 # Test Logs & Action Recordings
 user_recorded_actions.json
+test_start.txt
 
 # Data outputs (CSV & Summary)
+results/
 *.csv
 *_summary.txt

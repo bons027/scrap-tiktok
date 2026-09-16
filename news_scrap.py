@@ -195,6 +195,16 @@ def standardize_date(raw_date):
         y, m, d = simple_iso.groups()
         return f"{y}-{m}-{d} 00:00:00"
 
+    # Format DD.MM.YYYY atau DD/MM/YYYY (e.g. 16.09.2026 atau 16/09/2026)
+    dmy_match = re.search(r'(\d{1,2})[\.\/](\d{1,2})[\.\/](\d{4})(?:\s+(\d{1,2})[:\.](\d{2}))?', raw_date)
+    if dmy_match:
+        d = int(dmy_match.group(1))
+        m = int(dmy_match.group(2))
+        y = dmy_match.group(3)
+        hh = dmy_match.group(4) if dmy_match.group(4) else "00"
+        mm = dmy_match.group(5) if dmy_match.group(5) else "00"
+        return f"{y}-{m:02d}-{d:02d} {int(hh):02d}:{int(mm):02d}:00"
+
     # Indonesian Month Names mapping
     months_id = {
         'januari': '01', 'jan': '01',
@@ -211,8 +221,8 @@ def standardize_date(raw_date):
         'desember': '12', 'des': '12', 'dec': '12'
     }
 
-    # Format: "Jumat, 20 Februari 2026 13:24 WIB" atau "20 Feb 2026, 13:24"
-    date_pat = re.search(r'(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})(?:\s+(\d{1,2})[:\.](\d{2}))?', raw_date, re.IGNORECASE)
+    # Format: "Jumat, 20 Februari 2026 13:24 WIB" atau "Senin, 07 September 2026 | 08:04 WIB"
+    date_pat = re.search(r'(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})(?:.*?(\d{1,2})[:\.](\d{2}))?', raw_date, re.IGNORECASE)
     if date_pat:
         d = int(date_pat.group(1))
         m_str = date_pat.group(2).lower()
@@ -235,14 +245,31 @@ def standardize_date(raw_date):
         elif 'hari' in unit:
             return (now - datetime.timedelta(days=val)).strftime("%Y-%m-%d %H:%M:%S")
 
+    # Format jam saja: "08:05 WIB"
+    time_match = re.search(r'^(\d{1,2})[:\.](\d{2})(?:\s*WIB|\s*WITA|\s*WIT)?$', raw_date)
+    if time_match:
+        now = datetime.now()
+        return f"{now.strftime('%Y-%m-%d')} {int(time_match.group(1)):02d}:{int(time_match.group(2)):02d}:00"
+
     return raw_date
 
 
 def detect_platform(url):
     """
     Mendeteksi nama portal media dari domain URL artikel.
+    Mendukung Media Nasional dan Media Lokal Solo Raya & Klaten.
     """
     url_lower = url.lower()
+
+    # 1. Media Lokal Solo Raya & Klaten
+    if 'suarasolo' in url_lower or 'surakarta.suara.com' in url_lower: return 'Suara Solo'
+    if 'surakartaraya' in url_lower: return 'Surakarta Raya'
+    if 'lintassoloraya' in url_lower: return 'Lintas Soloraya News'
+    if 'lensaklaten' in url_lower: return 'Lensa Klaten'
+    if 'kabarklaten' in url_lower: return 'Kabar Klaten'
+    if 'beritaklaten' in url_lower: return 'Berita Klaten'
+
+    # 2. Media Regional & Nasional Utama
     if 'detik.com' in url_lower: return 'Detik.com'
     if 'kompas.com' in url_lower: return 'Kompas.com'
     if 'tribunnews.com' in url_lower or 'tribun' in url_lower: return 'Tribunnews.com'
@@ -340,8 +367,8 @@ def parse_article_detail(url, session=None):
             title = soup.find('h1').get_text()
         
         title = clean_text(title)
-        # Bersihkan akhiran portal di title (contoh: " - detikcom", " - Kompas.com")
-        title = re.sub(r'\s*[-|–]\s*(detikcom|kompas\.com|solopos\.com|tribunnews\.com|tempo\.co|antara|liputan6\.com|cnn indonesia|sindonews|merdeka\.com|idntimes).*$', '', title, flags=re.IGNORECASE).strip()
+        # Bersihkan akhiran portal di title (contoh: " - detikcom", " - Kompas.com", " - Lensa Klaten", dll)
+        title = re.sub(r'\s*[-|–]\s*(detikcom|kompas\.com|solopos\.com|tribunnews\.com|tempo\.co|antara|liputan6\.com|cnn indonesia|sindonews|merdeka\.com|idntimes|suara solo|lensa klaten|berita klaten|lintas soloraya|kabar klaten|surakarta raya|media online).*$', '', title, flags=re.IGNORECASE).strip()
 
         if not title or len(title) < 5:
             return None
@@ -376,11 +403,22 @@ def parse_article_detail(url, session=None):
         if pub_meta and pub_meta.get('content'):
             date_str = standardize_date(pub_meta['content'])
         else:
-            date_el = soup.select_one('.date, .read__time, .detail__date, .media-date, time, .side-article-time, .article__date')
+            date_el = soup.select_one('.date-article, .entry-date, time, .read__time, .detail__date, .media-date, .side-article-time, .article__date, .post-date, .date')
             if date_el:
                 date_str = standardize_date(date_el.get_text())
-            else:
-                date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Fallback ekstraksi tanggal dari path URL (misal: /2026/09/07/080412/ atau /2026/09/16/)
+        if not date_str or date_str.startswith(datetime.now().strftime("%Y-%m-%d")):
+            url_date_match = re.search(r'/(\d{4})/(\d{2})/(\d{2})(?:/(\d{2})(\d{2})(\d{2}))?', url)
+            if url_date_match:
+                uy, um, ud, uh, umn, us = url_date_match.groups()
+                uh = uh or "00"
+                umn = umn or "00"
+                us = us or "00"
+                date_str = f"{uy}-{um}-{ud} {uh}:{umn}:{us}"
+
+        if not date_str:
+            date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # 5. Tags / Hashtags Digunakan
         tags = []
@@ -519,7 +557,8 @@ def search_duckduckgo(keyword, max_results=30, session=None):
         "detik.com", "kompas.com", "tribunnews.com", "solopos.espos.id",
         "antaranews.com", "tempo.co", "liputan6.com", "cnnindonesia.com",
         "sindonews.com", "merdeka.com", "kumparan.com", "radarsolo.jawapos.com",
-        "suara.com", "rri.co.id"
+        "suara.com", "rri.co.id", "suarasolo.id", "surakartaraya.com",
+        "lintassolorayanews.com", "lensaklaten.com", "kabarklaten.com", "beritaklaten.com"
     ]
     query = f"{keyword} (" + " OR ".join([f"site:{d}" for d in domains]) + ")"
     url = "https://html.duckduckgo.com/html/"
@@ -690,6 +729,85 @@ def search_tribun(keyword, max_results=30, session=None):
     return results
 
 
+def search_local_media(keyword, max_results=30, session=None):
+    """
+    Search Engine Khusus 6 Media Lokal Solo Raya & Klaten:
+    1. Suara Solo (suarasolo.id & surakarta.suara.com)
+    2. Surakarta Raya (surakartaraya.com)
+    3. Lintas Soloraya News (lintassolorayanews.com)
+    4. Lensa Klaten (lensaklaten.com)
+    5. Kabar Klaten (kabarklaten.com)
+    6. Berita Klaten (beritaklaten.com)
+    """
+    req_session = session or requests.Session()
+    results = []
+    quota_per_site = max(4, max_results // 4)
+
+    # 1. Direct Search Engine via CMS WordPress (Lensa Klaten, Berita Klaten, Suara Solo)
+    wp_targets = [
+        ("Lensa Klaten", "https://www.lensaklaten.com/"),
+        ("Berita Klaten", "https://beritaklaten.com/"),
+        ("Suara Solo", "https://suarasolo.id/")
+    ]
+
+    for site_name, base_url in wp_targets:
+        if len(results) >= max_results:
+            break
+        try:
+            search_url = f"{base_url}?s={urllib.parse.quote(keyword)}"
+            resp = req_session.get(search_url, headers=DEFAULT_HEADERS, timeout=10)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                count = 0
+                for a in soup.select('article a, h2 a, h3 a, .entry-title a, .post-title a, .elementor-post__title a'):
+                    href = a.get('href', '')
+                    if href and href.startswith('http') and not any(x in href for x in ['/tag/', '/tags/', '/category/', '/author/', '#', '?s=']):
+                        if href not in results:
+                            results.append(href)
+                            count += 1
+                    if count >= quota_per_site or len(results) >= max_results:
+                        break
+        except Exception:
+            pass
+
+    # 2. Targeted Site Search via DuckDuckGo (Lintas Soloraya, Suara Surakarta, Surakarta Raya, Kabar Klaten)
+    ddg_targets = [
+        "lintassolorayanews.com",
+        "surakarta.suara.com",
+        "surakartaraya.com",
+        "kabarklaten.com"
+    ]
+
+    for domain in ddg_targets:
+        if len(results) >= max_results:
+            break
+        try:
+            q = f"{keyword} site:{domain}"
+            resp = req_session.post("https://html.duckduckgo.com/html/", data={"q": q}, headers=DEFAULT_HEADERS, timeout=10)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                count = 0
+                for el in soup.select('.result'):
+                    title_el = el.select_one('.result__title a')
+                    if not title_el:
+                        continue
+                    href = title_el.get('href', '')
+                    if 'uddg=' in href:
+                        qs = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+                        if 'uddg' in qs:
+                            href = qs['uddg'][0]
+                    if href and domain in href and not any(x in href for x in ['/tag/', '/tags/', '/search', '/indeks', '/topik/']):
+                        if href not in results:
+                            results.append(href)
+                            count += 1
+                    if count >= quota_per_site or len(results) >= max_results:
+                        break
+        except Exception:
+            pass
+
+    return results
+
+
 # ==========================================
 # MULTI-SOURCE SEARCH DISPATCHER
 # ==========================================
@@ -703,19 +821,22 @@ def fetch_article_urls_for_keyword(keyword, source_mode="all", max_articles=30):
     print(f"  🔍 Menghubungi Search Engine untuk keyword: '{keyword}'...")
 
     if source_mode == "all":
-        # Multi-engine aggregator: DDG + Detik + Kompas + Solopos + Antara
-        target_per_source = max(5, max_articles // 3)
+        # Multi-engine aggregator: Media Lokal + DDG + Solopos + Detik + Kompas + Antara
+        target_per_source = max(5, max_articles // 4)
+        local_urls = search_local_media(keyword, max_results=target_per_source, session=session)
         ddg_urls = search_duckduckgo(keyword, max_results=max_articles, session=session)
+        solopos_urls = search_solopos(keyword, max_results=target_per_source, session=session)
         detik_urls = search_detik(keyword, max_results=target_per_source, session=session)
         kompas_urls = search_kompas(keyword, max_results=target_per_source, session=session)
-        solopos_urls = search_solopos(keyword, max_results=target_per_source, session=session)
         antara_urls = search_antara(keyword, max_results=target_per_source, session=session)
 
-        # Merge & deduplicate preserving order
-        for u_list in [ddg_urls, detik_urls, kompas_urls, solopos_urls, antara_urls]:
+        # Merge & deduplicate preserving order (utamakan media lokal & solopos untuk isu kedaerahan)
+        for u_list in [local_urls, ddg_urls, solopos_urls, detik_urls, kompas_urls, antara_urls]:
             for u in u_list:
                 if u not in urls:
                     urls.append(u)
+    elif source_mode == "local":
+        urls = search_local_media(keyword, max_results=max_articles, session=session)
     elif source_mode == "ddg":
         urls = search_duckduckgo(keyword, max_results=max_articles, session=session)
     elif source_mode == "detik":
@@ -880,15 +1001,16 @@ def main_menu():
 
     # 2. Pilih Mesin Pencari / Sumber Media
     print("\nPilih Sumber / Mesin Pencari Media:")
-    print("  [1] Semua Portal Media (Aggregator: Detik, Kompas, Solopos, Antara, Tribun, Tempo, dll.) - [DIREKOMENDASIKAN]")
+    print("  [1] Semua Portal Media (Aggregator: Detik, Kompas, Solopos, Media Lokal Solo & Klaten, Antara, Tribun, dll.) - [DIREKOMENDASIKAN]")
     print("  [2] Detik.com")
     print("  [3] Kompas.com")
     print("  [4] Solopos.com / Espos.id (Solo Raya & Klaten)")
     print("  [5] LKBN Antara News")
     print("  [6] Tribunnews Network")
     print("  [7] DuckDuckGo Search Engine")
+    print("  [8] Media Lokal Solo Raya & Klaten (Suara Solo, Surakarta Raya, Lintas Soloraya, Lensa Klaten, Kabar Klaten, Berita Klaten)")
 
-    choice_src = input("Pilihan (1-7) [Default: 1]: ").strip()
+    choice_src = input("Pilihan (1-8) [Default: 1]: ").strip()
     source_map = {
         "1": "all",
         "2": "detik",
@@ -896,7 +1018,8 @@ def main_menu():
         "4": "solopos",
         "5": "antara",
         "6": "tribun",
-        "7": "ddg"
+        "7": "ddg",
+        "8": "local"
     }
     selected_source = source_map.get(choice_src, "all")
 

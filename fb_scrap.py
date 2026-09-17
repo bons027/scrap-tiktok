@@ -451,6 +451,75 @@ def is_keyword_relevant(post_text, author="", keyword="", group_name=None, card_
     return core_words_in_post
 
 
+def is_mode1_keyword_relevant(post_text, author="", keyword="", card_full_text=""):
+    """
+    Validasi relevansi kata kunci khusus untuk Pencarian Global Facebook (Mode 1):
+    - Tepat sasaran (on point): Menyaring postingan rekomendasi, berita global, atau iklan yang tidak berhubungan.
+    - Menjamin postingan yang memuat kata kunci / entitas utama TIDAK AKAN terlewat.
+    - Menghilangkan interferensi banner UI pencarian Facebook ('Hasil untuk...', 'Filter...', dll).
+    """
+    if not keyword or not keyword.strip() or keyword.strip().lower() == "feed terbaru":
+        return True
+
+    kw_raw = keyword.strip()
+    kw_lower = kw_raw.lower()
+
+    # Hapus baris banner pencarian seperti 'Hasil untuk <keyword>', 'Menampilkan hasil...', dll
+    clean_card = (card_full_text or "").lower()
+    clean_card = re.sub(r'(?:hasil untuk|menampilkan hasil|results for|showing results for|filter hasil)[^\n\r]*', '', clean_card, flags=re.I)
+    for ban in ['saran untuk anda', 'orang yang mungkin anda kenal', 'tambah jadi teman', 'tambahkan teman']:
+        clean_card = clean_card.replace(ban, '')
+
+    txt = (post_text or "").lower()
+    auth = (author or "").lower()
+
+    # Konten utama postingan (author + teks caption)
+    core_content = f"{auth} {txt}".strip()
+    content = f"{core_content} {clean_card}".strip()
+
+    # 1. Mode Frasa Persis jika diapit tanda kutip: "kata kunci" atau 'kata kunci'
+    if (kw_raw.startswith('"') and kw_raw.endswith('"')) or (kw_raw.startswith("'") and kw_raw.endswith("'")):
+        phrase = kw_raw[1:-1].strip().lower()
+        return phrase in core_content or (phrase in content and len(txt) > 0)
+
+    # 2. Cek kemunculan di core_content (author + post_text)
+    if kw_lower in core_content:
+        return True
+
+    # 3. Pecah token kata kunci (abaikan tanda baca)
+    tokens = [w for w in re.findall(r'\b\w+\b', kw_lower) if len(w) >= 2]
+    if not tokens:
+        return True
+
+    # Jika hanya 1 kata (misal: "hamenang", "bkk", "desil")
+    if len(tokens) == 1:
+        return tokens[0] in core_content or (tokens[0] in clean_card and len(txt) >= 5)
+
+    # 4. Multi-kata:
+    # A. Cek entitas utama unik ('hamenang', 'troketon', 'desil', 'bkk', 'mbg', 'pkh', 'blt')
+    primary_entities = [t for t in tokens if t in ['hamenang', 'troketon', 'desil', 'bkk', 'mbg', 'pkh', 'blt']]
+    for ent in primary_entities:
+        if ent in core_content or (ent in clean_card and len(txt) >= 5):
+            return True
+
+    # B. Cek topik isu non-geografis (misal 'jalan rusak klaten' -> 'jalan' & 'rusak')
+    non_geo_tokens = [t for t in tokens if t not in ['klaten', 'kabupaten', 'kota', 'daerah', 'jateng', 'jawa', 'tengah']]
+    if len(non_geo_tokens) >= 2:
+        target_eval = core_content if len(txt) >= 10 else content
+        if all(t in target_eval for t in non_geo_tokens):
+            return True
+    elif len(non_geo_tokens) == 1:
+        if non_geo_tokens[0] in core_content or (non_geo_tokens[0] in clean_card and len(txt) >= 5):
+            return True
+
+    # C. Fallback rasio kecocokan token >= 60%
+    matched_tokens = [t for t in tokens if t in core_content]
+    if len(matched_tokens) / len(tokens) >= 0.6:
+        return True
+
+    return False
+
+
 def is_page_or_group_broken(driver, expected_url=""):
     """
     Mendeteksi apakah halaman atau grup Facebook rusak, dihapus, tidak tersedia,
@@ -1112,38 +1181,40 @@ def format_facebook_url(raw_url="", current_page_url="", post_id="", author="", 
         return f"https://www.facebook.com/permalink.php?story_fbid={p_id}"
 
     # B. /groups/{id}/posts/{postId} atau /groups/{id}/permalink/{postId}
-    m_grp_post = re.search(r'/groups/[^/?#]+/(?:user/[^/?#]+/)?(?:posts|permalink)/([0-9]{6,25})', raw_url)
+    m_grp_post = re.search(r'/groups/[^/?#]+/(?:user/[^/?#]+/)?(?:posts|permalink)/([0-9]{6,25}|pfbid[a-zA-Z0-9_-]+)', raw_url)
     if m_grp_post:
         p_id = m_grp_post.group(1)
         if group_id and p_id != group_id:
             return f"https://www.facebook.com/groups/{group_id}/posts/{p_id}"
 
     # C. multi_permalinks
-    m_multi = re.search(r'[?&]multi_permalinks=([0-9]{6,25})', raw_url)
+    m_multi = re.search(r'[?&]multi_permalinks=([0-9]{6,25}|pfbid[a-zA-Z0-9_-]+)', raw_url)
     if m_multi:
         p_id = m_multi.group(1)
         if group_id and p_id != group_id:
             return f"https://www.facebook.com/groups/{group_id}/posts/{p_id}"
 
-    # D. story_fbid
-    m_story = re.search(r'[?&]story_fbid=([0-9]{6,25})', raw_url)
+    # D. story_fbid / story.php / permalink.php
+    m_story = re.search(r'[?&]story_fbid=([0-9]{6,25}|pfbid[a-zA-Z0-9_-]+)', raw_url)
     if m_story:
         p_id = m_story.group(1)
-        if group_id and p_id != group_id:
-            return f"https://www.facebook.com/permalink.php?story_fbid={p_id}&id={group_id}"
+        m_u_id = re.search(r'[?&]id=([0-9]+)', raw_url)
+        target_uid = m_u_id.group(1) if m_u_id else (group_id if group_id and p_id != group_id else '')
+        if target_uid:
+            return f"https://www.facebook.com/permalink.php?story_fbid={p_id}&id={target_uid}"
         return f"https://www.facebook.com/permalink.php?story_fbid={p_id}"
 
     # 5. USER / PAGE POST
-    m_user_post = re.search(r'facebook\.com/([^/?#]+)/posts/([0-9]{6,25})', raw_url)
-    if m_user_post and m_user_post.group(1).lower() not in ['groups', 'permalink.php', 'story.php']:
+    m_user_post = re.search(r'facebook\.com/([^/?#]+)/posts/([0-9]{6,25}|pfbid[a-zA-Z0-9_-]+)', raw_url)
+    if m_user_post and m_user_post.group(1).lower() not in ['groups', 'permalink.php', 'story.php', 'search']:
         return f"https://www.facebook.com/{m_user_post.group(1)}/posts/{m_user_post.group(2)}"
 
     # 6. Fallback jika ada group_id dan post_id yang valid
-    if group_id and post_id and post_id != group_id and re.match(r'^[0-9]{6,25}$', post_id):
+    if group_id and post_id and post_id != group_id and re.match(r'^(?:[0-9]{6,25}|pfbid[a-zA-Z0-9_-]+)$', post_id):
         return f"https://www.facebook.com/groups/{group_id}/posts/{post_id}"
 
     # 7. Fallback post_id saja
-    if post_id and re.match(r'^[0-9]{6,25}$', post_id):
+    if post_id and re.match(r'^(?:[0-9]{6,25}|pfbid[a-zA-Z0-9_-]+)$', post_id):
         return f"https://www.facebook.com/permalink.php?story_fbid={post_id}"
 
     # 8. Jika URL bersih sudah spesifik
@@ -1299,7 +1370,10 @@ def scroll_comment_container_center(driver, distance=550):
         dialog = driver.find_element(By.CSS_SELECTOR, 'div[role="dialog"], div[aria-modal="true"], div[data-pagelet*="Tahoe"], div[data-pagelet*="Watch"], div[role="complementary"]')
         ActionChains(driver).move_to_element(dialog).scroll_by_amount(0, distance).perform()
     except Exception:
-        pass
+        try:
+            ActionChains(driver).scroll_by_amount(0, distance).perform()
+        except Exception:
+            pass
 
     try:
         driver.execute_script("""
@@ -1318,6 +1392,10 @@ def scroll_comment_container_center(driver, distance=550):
                     }
                 }
                 if (!target) target = dialog;
+            } else {
+                // Fallback untuk halaman standalone post (tanpa modal dialog)
+                target = document.querySelector('div[role="main"]') || document.documentElement || document.body;
+                window.scrollBy(0, distance);
             }
 
             if (target) {
@@ -2369,6 +2447,692 @@ def process_direct_post_url(driver, target_url, post_csv, comment_csv, max_comme
             "", p_lang, p_hashtags, "", p_url
         ])
         print(f"  [i] Postingan tidak memiliki komentar. Link postingan ({p_url}) berhasil disimpan ke file CSV!")
+
+
+def extract_standalone_post_details(driver):
+    """
+    Mengekstrak detail postingan (caption lengkap, tanggal, reaksi, komentar)
+    saat URL postingan dibuka di tab terpisah.
+    """
+    try:
+        # Klik otomatis tombol "Lihat selengkapnya" / "See more" agar caption tidak terpotong
+        driver.execute_script("""
+            let seeMoreBtns = document.querySelectorAll('div[role="button"], span[role="button"]');
+            for (let btn of seeMoreBtns) {
+                let bTxt = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+                if (bTxt === 'lihat selengkapnya' || bTxt === 'see more' || bTxt === 'baca selengkapnya' || bTxt === 'selengkapnya') {
+                    try { btn.click(); } catch(e) {}
+                }
+            }
+        """)
+        time.sleep(0.3)
+    except Exception:
+        pass
+
+    try:
+        details = driver.execute_script("""
+            let postEl = document.querySelector('div[role="feed"] > div, div[role="article"], div[data-ad-preview="message"], div[class*="x1yztbdb"], div[role="main"]');
+            if (!postEl) postEl = document.body;
+
+            // Caption
+            let postText = '';
+            let msgSelectors = [
+                'div[data-ad-preview="message"]',
+                'div[data-ad-comet-preview="message"]',
+                'div[data-testid="post_message"]',
+                'div[dir="auto"][style*="text-align"]',
+                'div.x1iorvi4'
+            ];
+            for (let sel of msgSelectors) {
+                let mEl = postEl.querySelector(sel);
+                if (mEl) {
+                    let t = (mEl.innerText || mEl.textContent || '').trim();
+                    if (t.length > postText.length) postText = t;
+                }
+            }
+
+            // Tanggal
+            let postDate = '';
+            const monthRegex = /\\b(?:januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember|january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|agt|agu|aug|sep|okt|oct|nov|des|dec)\\b/i;
+            const yearRegex = /\\b(19\\d{2}|20\\d{2})\\b/;
+            const relTimeRegex = /\\b\\d+\\s*(?:thn|th|tahun|yr|yrs|year|years|mgg|minggu|wk|week|weeks|hr|hari|day|days|jam|jm|hour|hours|mnt|menit|min|mins|lalu|ago)\\b/i;
+
+            let timeCands = [];
+            let tLinks = postEl.querySelectorAll('abbr, a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], a[role="link"], [aria-label], span[dir="auto"]');
+            for (let tl of tLinks) {
+                if (tl.closest('div[data-ad-preview="message"], div[data-ad-comet-preview="message"], div[data-testid="post_message"], form')) continue;
+                let aria = (tl.getAttribute('aria-label') || '').trim();
+                let txt = (tl.innerText || tl.textContent || '').trim();
+                if (aria) timeCands.push(aria);
+                if (txt) timeCands.push(txt);
+            }
+            for (let rawCand of timeCands) {
+                if (!rawCand) continue;
+                let cand = rawCand.split('·')[0].split('\\u00b7')[0].trim();
+                if (cand.length < 2 || cand.length > 70) continue;
+                let cLower = cand.toLowerCase();
+                if (cLower.includes('komentar') || cLower.includes('reaksi') || cLower.includes('suka') || cLower.includes('bagikan') || cLower.includes('ikuti')) continue;
+                if (yearRegex.test(cand) || (monthRegex.test(cand) && /\\d/.test(cand)) || relTimeRegex.test(cand) || cLower.includes('kemarin') || cLower.includes('baru saja') || cLower.endsWith(' yang lalu') || cLower.endsWith(' lalu') || cLower.endsWith(' ago')) {
+                    if (yearRegex.test(cand)) {
+                        postDate = cand;
+                        break;
+                    } else if (!postDate) {
+                        postDate = cand;
+                    }
+                }
+            }
+
+            // Stats
+            let commentsCount = 0;
+            let reactionsCount = 0;
+            let allBtns = postEl.querySelectorAll('div[role="button"], span[dir="auto"], span, a');
+            for (let s of allBtns) {
+                let t = (s.innerText || s.textContent || '').toLowerCase();
+                let aria = (s.getAttribute('aria-label') || '').toLowerCase();
+                let mCom = t.match(/(\\d+(?:[.,]\\d+)?\\s*(?:rb|k|jt|m)?)\\s*(?:komentar|comment)/i) ||
+                           aria.match(/(\\d+(?:[.,]\\d+)?\\s*(?:rb|k|jt|m)?)\\s*(?:komentar|comment)/i);
+                if (mCom) {
+                    let numStr = mCom[1].replace(/\\s/g, '').replace(',', '.');
+                    if (numStr.endsWith('rb') || numStr.endsWith('k')) commentsCount = Math.round(parseFloat(numStr) * 1000);
+                    else if (numStr.endsWith('jt') || numStr.endsWith('m')) commentsCount = Math.round(parseFloat(numStr) * 1000000);
+                    else commentsCount = parseInt(numStr.replace(/[^0-9]/g, '')) || 0;
+                    break;
+                }
+            }
+            for (let s of allBtns) {
+                let aria = (s.getAttribute('aria-label') || '').toLowerCase();
+                let mReact = aria.match(/(\\d+(?:[.,]\\d+)?\\s*(?:rb|k)?)\\s*(?:reaksi|suka|like|orang menanggapi)/i);
+                if (mReact) {
+                    let numStr = mReact[1].replace(/\\s/g, '').replace(',', '.');
+                    reactionsCount = numStr.endsWith('rb') || numStr.endsWith('k') ? Math.round(parseFloat(numStr) * 1000) : (parseInt(numStr.replace(/[^0-9]/g, '')) || 0);
+                    break;
+                }
+            }
+
+            return {
+                post_text: postText,
+                post_date: postDate,
+                comments_count: commentsCount,
+                reactions_count: reactionsCount
+            };
+        """)
+        return details or {}
+    except Exception:
+        return {}
+
+
+def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20, max_comments_per_post=150, min_year=2025):
+    """
+    Workflow Khusus Mode 1: Pencarian Otomatis Kata Kunci Isu Daerah Facebook.
+    1. Membuka feed pencarian Facebook untuk kata kunci dengan presisi tinggi.
+    2. Mendeteksi postingan di feed, mengekstrak URL permalink (mendukung pfbid modern).
+    3. Memfilter relevansi secara akurat (on point, anti-false-positive, anti-false-negative).
+    4. Menyedot komentar dengan membuka postingan di tab terisolasi tanpa merusak scroll feed pencarian.
+    5. Menyimpan metadata postingan dan seluruh komentar/balasan secara lengkap ke CSV.
+    """
+    seen_signatures, seen_post_ids, seen_post_urls, seen_comment_keys = load_all_existing_sheet_data(post_csv, comment_csv)
+
+    total_posts_saved = 0
+    total_comments_saved = 0
+    empty_scrolls = 0
+
+    search_url_chrono = f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(keyword)}&filters={FB_CHRONOSORT_FILTER}"
+    search_url_standard = f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(keyword)}"
+
+    max_label = f"{max_posts} Postingan" if max_posts > 0 else "Tanpa Batas (Ambil Semua)"
+    com_label = f"{max_comments_per_post} Komentar / Post" if max_comments_per_post > 0 else "Tanpa Batas (Ambil Semua)"
+    print("\n" + "=" * 65)
+    print(f"[*] [MODE 1 AKTIF] Pencarian Facebook Kata Kunci: '{keyword}'")
+    print(f"[*] Target Batas Postingan   : {max_label}")
+    print(f"[*] Target Batas Komentar    : {com_label}")
+    print(f"[*] Filter Periode Postingan : Minimal Tahun {min_year} ke atas")
+    if seen_signatures or seen_post_ids:
+        print(f"[*] [DEDUPLIKASI AKTIF] Terdeteksi {len(seen_signatures)} postingan & {len(seen_comment_keys)} komentar sudah ada di sheet (akan otomatis di-SKIP).")
+    print(f"[*] Lokasi Penyimpanan Hasil:")
+    print(f"    - Postingan: {post_csv}")
+    print(f"    - Komentar : {comment_csv}")
+    print("=" * 65)
+
+    # 1. Buka URL pencarian chronosort
+    try:
+        driver.get(search_url_chrono)
+        pause_ctrl.sleep(3.5)
+    except Exception as e:
+        print(f"  [!] Gagal membuka URL pencarian: {e}")
+        return
+
+    # Periksa apakah halaman rusak / dialihkan
+    is_broken, broken_reason = is_page_or_group_broken(driver, expected_url=search_url_chrono)
+    if is_broken:
+        print(f"  [!] Halaman pencarian terindikasi terganggu ({broken_reason}). Mencoba pencarian standar...")
+        try:
+            driver.get(search_url_standard)
+            pause_ctrl.sleep(3.0)
+        except Exception:
+            pass
+
+    # Periksa apakah feed kosong dengan filter chronosort, jika ya gunakan pencarian standar
+    has_feed = driver.execute_script("""
+        let articles = document.querySelectorAll('div[role="feed"] > div, div[role="article"]');
+        return articles.length > 0;
+    """)
+    if not has_feed:
+        print("  [*] Mengaktifkan pencarian standar Facebook untuk memaksimalkan hasil relevan...")
+        try:
+            driver.get(search_url_standard)
+            pause_ctrl.sleep(3.0)
+            apply_recent_posts_filter(driver)
+        except Exception:
+            pass
+
+    search_tab_handle = driver.current_window_handle
+
+    while (max_posts == 0 or total_posts_saved < max_posts) and empty_scrolls < 15:
+        if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
+            break
+
+        # Pastikan kembali ke tab pencarian utama jika ada tab lain yang tertinggal
+        if len(driver.window_handles) > 1:
+            for handle in driver.window_handles:
+                if handle != search_tab_handle:
+                    try:
+                        driver.switch_to.window(handle)
+                        driver.close()
+                    except Exception:
+                        pass
+            driver.switch_to.window(search_tab_handle)
+
+        # Cari postingan berikutnya yang belum diproses dari feed pencarian
+        next_post = driver.execute_script("""
+            let seenSignatures = arguments[0];
+            let seenPostIds = arguments[1];
+            let seenPostUrls = arguments[2];
+
+            function decodeUzpf(tokenStr) {
+                if (!tokenStr) return '';
+                let m = tokenStr.match(/Uzpf([a-zA-Z0-9_-]+={0,2})/);
+                if (!m) return '';
+                let b64Part = m[1].replace(/-/g, '+').replace(/_/g, '/');
+                let pad = 4 - (b64Part.length % 4);
+                if (pad > 0 && pad < 4) b64Part += '='.repeat(pad);
+                try {
+                    let dec = atob(b64Part);
+                    let mId = dec.match(/(?:ISC|VK|story|fbid):([0-9]{8,25})/);
+                    if (mId) return mId[1];
+                    let digits = dec.match(/([0-9]{10,25})/g);
+                    if (digits && digits.length > 0) return digits[digits.length - 1];
+                } catch(e) {}
+                return '';
+            }
+
+            function getPostCards() {
+                let candidates = document.querySelectorAll('div[role="feed"] > div, div[role="article"]');
+                if (candidates.length === 0) {
+                    candidates = document.querySelectorAll('div[data-ad-preview="message"], div[class*="x1yztbdb"]');
+                }
+                let postCards = [];
+                for (let c of candidates) {
+                    if (!c || c.offsetHeight < 60) continue;
+                    let isChild = false;
+                    for (let other of postCards) {
+                        if (other.contains(c)) { isChild = true; break; }
+                    }
+                    if (!isChild) {
+                        postCards = postCards.filter(existing => !c.contains(existing));
+                        postCards.push(c);
+                    }
+                }
+                return postCards;
+            }
+
+            let feedNodes = getPostCards();
+
+            for (let idx = 0; idx < feedNodes.length; idx++) {
+                let p = feedNodes[idx];
+                if (p.getAttribute('data-fb-seen') === 'true') {
+                    continue;
+                }
+
+                let cardFullText = (p.innerText || '').trim();
+                let cardLower = cardFullText.toLowerCase();
+
+                let hasPostLink = !!p.querySelector('a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], a[href*="/videos/"], a[href*="/reel/"], a[href*="/reels/"], a[href*="/watch"], a[href*="/share/"], a[href*="multi_permalinks"], a[href*="set=gm."], a[href*="set=pcb."], a[href*="?v="], a[href*="&v="], a[href*="/photo"]');
+                let hasPostMessage = !!p.querySelector('div[data-ad-preview="message"], div[data-ad-comet-preview="message"], div[data-testid="post_message"]');
+                let hasVideo = !!p.querySelector('video, div[data-video-id], [aria-label*="Video" i], [aria-label*="Reel" i], [aria-label*="Putar" i], [aria-label*="Play" i]');
+
+                // Lewati widget non-post
+                let isWidget = !hasVideo && (
+                    cardLower === 'ikuti' || cardLower === 'follow' || cardLower === 'tambah jadi teman' || cardLower === 'gabung' ||
+                    cardLower.startsWith('orang yang mungkin anda kenal') ||
+                    cardLower.startsWith('saran untuk anda') ||
+                    cardLower.startsWith('hasil untuk') ||
+                    cardLower.startsWith('menampilkan hasil') ||
+                    cardLower.startsWith('filter') ||
+                    (cardLower.includes('tambah jadi teman') && !hasPostLink) ||
+                    (!hasPostLink && !hasPostMessage && (cardLower.includes('ikuti') || cardLower.includes('follow') || cardLower.includes('gabung')))
+                );
+
+                if (isWidget) {
+                    p.setAttribute('data-fb-seen', 'true');
+                    continue;
+                }
+
+                // Klik tombol 'Lihat selengkapnya' jika ada
+                try {
+                    let seeMoreBtns = p.querySelectorAll('div[role="button"], span[role="button"]');
+                    for (let btn of seeMoreBtns) {
+                        let bTxt = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+                        if (bTxt === 'lihat selengkapnya' || bTxt === 'see more' || bTxt === 'baca selengkapnya' || bTxt === 'selengkapnya') {
+                            btn.click();
+                        }
+                    }
+                } catch(e) {}
+
+                // Ekstraksi caption/deskripsi postingan
+                let postText = '';
+                let primarySelectors = [
+                    'div[data-ad-preview="message"]',
+                    'div[data-ad-comet-preview="message"]',
+                    'div[data-testid="post_message"]',
+                    'div[id*="post_message"]',
+                    'div[class*="userContent"]',
+                    'div.x1iorvi4',
+                    'div[dir="auto"][style*="text-align"]'
+                ];
+                for (let sel of primarySelectors) {
+                    let msgEl = p.querySelector(sel);
+                    if (msgEl) {
+                        let txt = (msgEl.innerText || msgEl.textContent || '').trim();
+                        if (txt.length > 3) {
+                            postText = txt;
+                            break;
+                        }
+                    }
+                }
+
+                if (!postText) {
+                    let allBlocks = Array.from(p.querySelectorAll('div[dir="auto"], span[dir="auto"]'));
+                    let candidates = [];
+                    for (let b of allBlocks) {
+                        if (b.closest('div[role="button"], button, [aria-label*="Suka"], [aria-label*="Komentar"], [aria-label*="Bagikan"]')) continue;
+                        if (b.closest('h2, h3, h4, [role="heading"]')) continue;
+                        let t = (b.innerText || b.textContent || '').trim();
+                        let tLower = t.toLowerCase();
+                        if (t.length < 5 || tLower.startsWith('hasil untuk') || tLower.startsWith('menampilkan') || tLower.includes('grup publik') || tLower.endsWith(' lalu') || tLower.endsWith(' ago')) continue;
+                        candidates.push(t);
+                    }
+                    if (candidates.length > 0) {
+                        candidates.sort((a, b) => b.length - a.length);
+                        postText = candidates[0];
+                    }
+                }
+
+                // Helper resolusi teks elemen dengan SVG
+                function resolveElementTextWithSvg(element) {
+                    if (!element) return '';
+                    let result = '';
+                    let aria = element.getAttribute('aria-label');
+                    if (aria) result += aria + ' ';
+                    let labelledBy = element.getAttribute('aria-labelledby');
+                    if (labelledBy) {
+                        let ids = labelledBy.split(/\\s+/);
+                        for (let id of ids) {
+                            let target = document.getElementById(id);
+                            if (target) result += (target.textContent || target.innerText || '') + ' ';
+                        }
+                    }
+                    let uses = element.querySelectorAll('use');
+                    for (let u of uses) {
+                        let href = u.getAttribute('xlink:href') || u.getAttribute('href') || '';
+                        if (href.startsWith('#')) {
+                            let ref = document.getElementById(href.substring(1));
+                            if (ref) result += (ref.textContent || ref.innerText || '') + ' ';
+                        }
+                    }
+                    result += (element.innerText || element.textContent || '') + ' ';
+                    return result.replace(/\\s+/g, ' ').trim();
+                }
+
+                // Author
+                let author = 'Warga / Anonim';
+                let authorEl = p.querySelector('h2 a, h3 a, h4 a, h2 strong, h3 strong, h4 strong, a strong, strong span, a[role="link"] span, h2, h3');
+                if (authorEl) {
+                    let resolvedAuth = resolveElementTextWithSvg(authorEl);
+                    if (resolvedAuth) {
+                        let cleanA = resolvedAuth.split('\\n')[0].replace(/·\\s*(?:Ikuti|Follow|Gabung|Join|Disponsori|Sponsored).*$/i, '').trim();
+                        if (cleanA && !cleanA.toLowerCase().startsWith('hasil untuk') && cleanA.toLowerCase() !== 'facebook') {
+                            author = cleanA;
+                        }
+                    }
+                }
+
+                let authorLinkEl = p.querySelector('h2 a[href], h3 a[href], h4 a[href], strong a[href], a[role="link"][tabindex="0"]');
+                let profileUrl = authorLinkEl ? (authorLinkEl.href || '').split('?')[0] : '';
+
+                // Tanggal
+                let postDate = '';
+                const monthRegex = /\\b(?:januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember|january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|agt|agu|aug|sep|okt|oct|nov|des|dec)\\b/i;
+                const yearRegex = /\\b(19\\d{2}|20\\d{2})\\b/;
+                const relTimeRegex = /\\b\\d+\\s*(?:thn|th|tahun|yr|yrs|year|years|mgg|minggu|wk|week|weeks|hr|hari|day|days|jam|jm|hour|hours|mnt|menit|min|mins|lalu|ago)\\b/i;
+
+                let timeCandidates = [];
+                let timeLinks = p.querySelectorAll('abbr, a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], a[href*="/videos/"], a[href*="/reel/"], a[role="link"], [aria-label]');
+                for (let tl of timeLinks) {
+                    if (tl.closest('div[data-ad-preview="message"], div[data-ad-comet-preview="message"], form')) continue;
+                    let aria = (tl.getAttribute('aria-label') || '').trim();
+                    let txt = resolveElementTextWithSvg(tl);
+                    if (aria) timeCandidates.push(aria);
+                    if (txt) timeCandidates.push(txt);
+                }
+
+                for (let rawCand of timeCandidates) {
+                    if (!rawCand) continue;
+                    let cand = rawCand.split('·')[0].split('\\u00b7')[0].trim();
+                    if (cand.length < 2 || cand.length > 70) continue;
+                    let cLower = cand.toLowerCase();
+                    if (cLower.includes('komentar') || cLower.includes('reaksi') || cLower.includes('suka') || cLower.includes('bagikan') || cLower.includes('ikuti')) continue;
+                    if (yearRegex.test(cand) || (monthRegex.test(cand) && /\\d/.test(cand)) || relTimeRegex.test(cand) || cLower.includes('kemarin') || cLower.includes('baru saja') || cLower.endsWith(' yang lalu') || cLower.endsWith(' lalu') || cLower.endsWith(' ago')) {
+                        if (yearRegex.test(cand)) {
+                            postDate = cand;
+                            break;
+                        } else if (!postDate) {
+                            postDate = cand;
+                        }
+                    }
+                }
+                if (!postDate) postDate = 'Terkini';
+
+                // Ekstraksi Link Postingan & Post ID (Mendukung ID angka dan pfbid)
+                let postUrl = '';
+                let postId = '';
+                let isVideoPost = hasVideo || !!p.querySelector('video, div[data-video-id], [aria-label*="Video" i], [aria-label*="Reel" i]');
+
+                function parseMode1PostLink(url) {
+                    if (!url || typeof url !== 'string') return null;
+                    if (url.includes('/search/') || url.includes('/hashtag/') || url.includes('/notifications')) return null;
+
+                    // Watch
+                    let mWatch = url.match(/[?&]v=([0-9]{6,25})/i) || url.match(/\/watch\/?\?v=([0-9]{6,25})/i);
+                    if (mWatch) return { type: 'video', id: mWatch[1], canonicalUrl: `https://www.facebook.com/watch/?v=${mWatch[1]}` };
+
+                    // Reel
+                    let mReel = url.match(/\/(?:reel|reels)\/([0-9]{6,25}|[a-zA-Z0-9_-]+)/i);
+                    if (mReel) return { type: 'reel', id: mReel[1], canonicalUrl: `https://www.facebook.com/reel/${mReel[1]}/` };
+
+                    // Share
+                    let mShare = url.match(/\/share\/(v|r|p)\/([a-zA-Z0-9_-]+)/i);
+                    if (mShare) {
+                        let sType = mShare[1] === 'v' ? 'video' : (mShare[1] === 'r' ? 'reel' : 'post');
+                        return { type: sType, id: mShare[2], canonicalUrl: url.split('?')[0] };
+                    }
+
+                    // Groups Post (/groups/{groupId}/posts/{postId})
+                    let mGrp = url.match(/\/groups\/([^/?#]+)\/(?:user\/[^/?#]+\/)?(?:posts|permalink)\/([0-9]{6,25}|pfbid[a-zA-Z0-9_-]+)/i);
+                    if (mGrp) return { type: 'post', id: mGrp[2], canonicalUrl: `https://www.facebook.com/groups/${mGrp[1]}/posts/${mGrp[2]}` };
+
+                    // User/Page Post (/username/posts/{postId})
+                    let mUsr = url.match(/facebook\.com\/([^/?#]+)\/posts\/([0-9]{6,25}|pfbid[a-zA-Z0-9_-]+)/i);
+                    if (mUsr && !['groups', 'permalink.php', 'story.php'].includes(mUsr[1].toLowerCase())) {
+                        return { type: 'post', id: mUsr[2], canonicalUrl: `https://www.facebook.com/${mUsr[1]}/posts/${mUsr[2]}` };
+                    }
+
+                    // story_fbid / permalink.php
+                    let mStory = url.match(/[?&]story_fbid=([0-9]{6,25}|pfbid[a-zA-Z0-9_-]+)/i);
+                    if (mStory) {
+                        let mIdP = url.match(/[?&]id=([0-9]+)/i);
+                        let uId = mIdP ? mIdP[1] : '';
+                        let cUrl = uId ? `https://www.facebook.com/permalink.php?story_fbid=${mStory[1]}&id=${uId}` : `https://www.facebook.com/permalink.php?story_fbid=${mStory[1]}`;
+                        return { type: 'post', id: mStory[1], canonicalUrl: cUrl };
+                    }
+
+                    // Photo links
+                    if (url.includes('/photo') || url.includes('photo.php')) {
+                        let mFbid = url.match(/[?&]fbid=([0-9]{6,25})/i);
+                        if (mFbid) return { type: 'photo', id: mFbid[1], canonicalUrl: `https://www.facebook.com/photo/?fbid=${mFbid[1]}` };
+                    }
+
+                    return null;
+                }
+
+                // Prioritaskan link dari anchor timestamp/waktu
+                let timestampAnchor = p.querySelector('abbr a[href], a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], a[href*="/videos/"], a[href*="/reel/"], a[href*="/watch"], a[href*="/share/"]');
+                if (timestampAnchor && timestampAnchor.href) {
+                    let parsed = parseMode1PostLink(timestampAnchor.href);
+                    if (parsed) {
+                        postId = parsed.id;
+                        postUrl = parsed.canonicalUrl;
+                        if (parsed.type === 'video' || parsed.type === 'reel') isVideoPost = true;
+                    }
+                }
+
+                // Scan seluruh link kartu jika belum dapat
+                if (!postUrl) {
+                    let links = p.querySelectorAll('a[href*="/watch"], a[href*="/reel/"], a[href*="/reels/"], a[href*="/videos/"], a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], a[href*="/share/"], a[href*="Uzpf"], a[href*="/groups/"], a[role="link"][href], a[href]');
+                    for (let a of links) {
+                        let parsed = parseMode1PostLink(a.href || '');
+                        if (parsed) {
+                            postId = parsed.id;
+                            postUrl = parsed.canonicalUrl;
+                            if (parsed.type === 'video' || parsed.type === 'reel') isVideoPost = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Fallback Uzpf token
+                if (!postId) {
+                    for (let a of p.querySelectorAll('a[href*="Uzpf"]')) {
+                        let uzId = decodeUzpf(a.href || '');
+                        if (uzId) {
+                            postId = uzId;
+                            postUrl = `https://www.facebook.com/permalink.php?story_fbid=${uzId}`;
+                            break;
+                        }
+                    }
+                }
+
+                let signature = author + ':::' + postText.substring(0, 45);
+
+                // Stats (Comments & Reactions)
+                let commentCount = 0;
+                let reactionCount = 0;
+                let allSpansAndLinks = p.querySelectorAll('div[role="button"], a, span[dir="auto"], span, div[dir="auto"]');
+                for (let s of allSpansAndLinks) {
+                    let t = resolveElementTextWithSvg(s).toLowerCase();
+                    let aria = (s.getAttribute('aria-label') || '').toLowerCase();
+                    let mCom = t.match(/(\\d+(?:[.,]\\d+)?\\s*(?:rb|k|jt|m)?)\\s*(?:komentar|comment)/i) ||
+                               aria.match(/(\\d+(?:[.,]\\d+)?\\s*(?:rb|k|jt|m)?)\\s*(?:komentar|comment)/i);
+                    if (mCom) {
+                        let numStr = mCom[1].replace(/\\s/g, '').replace(',', '.');
+                        if (numStr.endsWith('rb') || numStr.endsWith('k')) commentCount = Math.round(parseFloat(numStr) * 1000);
+                        else if (numStr.endsWith('jt') || numStr.endsWith('m')) commentCount = Math.round(parseFloat(numStr) * 1000000);
+                        else commentCount = parseInt(numStr.replace(/[^0-9]/g, '')) || 0;
+                        break;
+                    }
+                }
+                for (let s of allSpansAndLinks) {
+                    let aria = (s.getAttribute('aria-label') || '').toLowerCase();
+                    let mReact = aria.match(/(\\d+(?:[.,]\\d+)?\\s*(?:rb|k)?)\\s*(?:reaksi|suka|like|orang menanggapi)/i);
+                    if (mReact) {
+                        let numStr = mReact[1].replace(/\\s/g, '').replace(',', '.');
+                        reactionCount = numStr.endsWith('rb') || numStr.endsWith('k') ? Math.round(parseFloat(numStr) * 1000) : (parseInt(numStr.replace(/[^0-9]/g, '')) || 0);
+                        break;
+                    }
+                }
+
+                p.setAttribute('data-fb-seen', 'true');
+
+                return {
+                    signature: signature,
+                    post_id: postId || '',
+                    author: author,
+                    profile_url: profileUrl,
+                    post_text: postText,
+                    post_date: postDate,
+                    post_url: postUrl || '',
+                    comments_count: commentCount,
+                    reactions_count: reactionCount,
+                    shares_count: 0,
+                    plays_count: 0,
+                    is_video: isVideoPost,
+                    card_full_text: cardFullText
+                };
+            }
+
+            return null;
+        """, list(seen_signatures), list(seen_post_ids), list(seen_post_urls))
+
+        if not next_post:
+            empty_scrolls += 1
+            perform_feed_scroll(driver, distance=random.randint(700, 900))
+            pause_ctrl.sleep(random.uniform(1.4, 2.0))
+            continue
+
+        empty_scrolls = 0
+        p_sig = next_post.get('signature')
+        p_id = next_post.get('post_id')
+        p_author = next_post.get('author')
+        p_profile_url = next_post.get('profile_url', '')
+        p_text = next_post.get('post_text')
+        p_card_full = next_post.get('card_full_text', '')
+        p_date = next_post.get('post_date')
+        p_url = next_post.get('post_url')
+        p_is_video = bool(next_post.get('is_video', False))
+        p_comments_count = next_post.get('comments_count', 0)
+        p_reactions_count = next_post.get('reactions_count', 0)
+
+        # Standardisasi URL jika belum canonical
+        if p_url:
+            p_url = format_facebook_url(raw_url=p_url, current_page_url=driver.current_url, post_id=p_id, author=p_author)
+
+        clean_url = p_url.split('?')[0].rstrip('/') if p_url else ''
+
+        # Deduplikasi Sheet
+        is_spec_url = is_specific_post_url(clean_url)
+        if p_sig in seen_signatures or (p_id and p_id in seen_post_ids) or (is_spec_url and clean_url in seen_post_urls):
+            seen_signatures.add(p_sig)
+            print(f"  [SUDAH ADA DI SHEET] Dilewati @{p_author}: \"{p_text[:40]}...\"")
+            continue
+
+        # Filter Tahun
+        if is_outdated_post(p_date, min_year=min_year):
+            print(f"  [DILEWATI] Postingan Usang ({p_date}) @{p_author}: \"{p_text[:40]}...\" (Filter aktif: Hanya tahun {min_year}+)")
+            continue
+
+        # Filter Kata Kunci Khusus Mode 1 (On Point & Anti-Terlewat)
+        if not is_mode1_keyword_relevant(p_text, author=p_author, keyword=keyword, card_full_text=p_card_full):
+            short_txt = (p_text or p_card_full or '').strip().replace('\n', ' ')
+            preview = f'"{short_txt[:40]}..."' if short_txt else '<Tanpa Teks>'
+            print(f"  [DILEWATI] Tidak Memuat Kata Kunci '{keyword}' @{p_author}: {preview}")
+            continue
+
+        seen_signatures.add(p_sig)
+        if p_id: seen_post_ids.add(p_id)
+        if is_spec_url: seen_post_urls.add(clean_url)
+
+        total_posts_saved += 1
+        target_str = f"/{max_posts}" if max_posts > 0 else ""
+        print("\n" + "=" * 65)
+        com_info = f" ({p_comments_count} komentar terdeteksi)" if p_comments_count > 0 else ""
+        print(f"[POST #{total_posts_saved}{target_str}] @{p_author} ({p_date}){com_info}")
+        print(f"  * URL Postingan: {p_url or '<Tidak Ditemukan>'}")
+        print(f"  \"{p_text[:75]}...\"")
+
+        # Ekstraksi Komentar via Tab Terisolasi
+        post_comments = []
+        if p_url and is_specific_post_url(p_url):
+            print("  [*] Membuka postingan di tab terpisah untuk menyedot komentar...")
+            try:
+                driver.switch_to.new_window('tab')
+                driver.get(p_url)
+                pause_ctrl.sleep(random.uniform(2.5, 3.5))
+
+                # Ambil detail tambahan dari halaman postingan langsung
+                updated_details = extract_standalone_post_details(driver)
+                if updated_details:
+                    up_txt = updated_details.get('post_text', '')
+                    if up_txt and len(up_txt) > len(p_text):
+                        p_text = up_txt
+                    up_date = updated_details.get('post_date', '')
+                    if up_date and up_date != 'Terkini':
+                        p_date = up_date
+                    up_com = updated_details.get('comments_count', 0)
+                    if up_com > p_comments_count:
+                        p_comments_count = up_com
+                    up_react = updated_details.get('reactions_count', 0)
+                    if up_react > p_reactions_count:
+                        p_reactions_count = up_react
+
+                # Ubah filter ke Semua Komentar
+                switch_filter_to_all_comments(driver)
+
+                # Ambil seluruh komentar & bongkar balasan sampai tuntas
+                post_comments = exhaustively_scroll_and_extract_comments(
+                    driver, max_idle_scrolls=4, max_total_comments_limit=max_comments_per_post,
+                    seen_comment_keys=seen_comment_keys, current_post_text=p_text
+                )
+                if post_comments:
+                    p_comments_count = max(p_comments_count, len(post_comments))
+            except Exception as tab_err:
+                print(f"  [!] Catatan saat ekstraksi komentar di tab: {tab_err}")
+            finally:
+                try:
+                    if len(driver.window_handles) > 1:
+                        driver.close()
+                except Exception:
+                    pass
+                driver.switch_to.window(search_tab_handle)
+                pause_ctrl.sleep(0.5)
+
+        # Simpan metadata postingan ke post_csv
+        p_hashtags = extract_hashtags(p_text)
+        p_lang = detect_language(p_text)
+        p_subtitles = "[Video]" if p_is_video else ""
+        if not p_id:
+            p_id = f"fb_{abs(hash(p_sig)) % 1000000000}"
+
+        save_to_csv(post_csv, [
+            "Facebook", keyword, p_id, p_date, p_author,
+            p_profile_url, "", 0, 0, "",
+            "", p_text, p_reactions_count, 0, 0,
+            p_comments_count, p_subtitles, p_lang, p_hashtags,
+            "No", "No", "No", "", "", p_url
+        ])
+
+        # Simpan komentar ke comment_csv
+        if post_comments:
+            for c in post_comments:
+                c_prof_url = c.get('profile_url', '')
+                c_username = c.get('username') or c.get('author', 'Warga')
+                c_author = c.get('author', 'Warga')
+                c_text = c.get('comment_text', '')
+                c_lang = detect_language(c_text)
+                c_is_rep = "Yes" if str(c.get('is_reply', '')).upper() in ['YA', 'YES', 'TRUE', '1'] else "No"
+                save_to_csv(comment_csv, [
+                    "Facebook", keyword, p_id, p_date, p_author,
+                    p_profile_url, p_text, p_reactions_count, 0, 0,
+                    p_comments_count, c.get('comment_id'), c.get('comment_date'), c_author, c_username,
+                    c_prof_url, c_text, c.get('likes', 0), c.get('reply_count', 0), c_is_rep,
+                    c.get('reply_to', ''), c_lang, p_hashtags, "", p_url
+                ])
+                total_comments_saved += 1
+            print(f"  [+] Selesai Post #{total_posts_saved}. Total {len(post_comments)} komentar & balasan baru tersimpan!")
+        else:
+            save_to_csv(comment_csv, [
+                "Facebook", keyword, p_id, p_date, p_author,
+                p_profile_url, p_text, p_reactions_count, 0, 0,
+                0, f"no_comment_{p_id}", p_date, "-", "-",
+                "", "[Tidak ada komentar]", 0, 0, "No",
+                "", p_lang, p_hashtags, "", p_url
+            ])
+            total_comments_saved += 1
+            print(f"  [+] Selesai Post #{total_posts_saved}. Link postingan ({p_url}) berhasil dicatat ke file komentar & postingan!")
+
+        # Scroll sedikit feed pencarian agar lazy loader terus memuat kartu baru
+        perform_feed_scroll(driver, distance=random.randint(450, 650))
+        pause_ctrl.sleep(random.uniform(0.8, 1.4))
+
+    print(f"\n[*] Selesai memproses kata kunci '{keyword}'. Total {total_posts_saved} postingan & {total_comments_saved} baris komentar dicatat.")
 
 
 def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20, max_comments_per_post=150, custom_search_url=None, group_name=None, min_year=2025):
@@ -3887,11 +4651,8 @@ def run_facebook_scraper():
                     save_session_progress(session_base_name, progress_data)
                     continue
 
-                search_url = f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(kw)}&filters={FB_CHRONOSORT_FILTER}"
                 try:
-                    driver.get(search_url)
-                    pause_ctrl.sleep(3.5)
-                    process_search_workflow(driver, kw, post_csv, comment_csv, max_posts=max_posts_target, max_comments_per_post=max_comments_limit, min_year=min_post_year)
+                    process_global_search_workflow(driver, kw, post_csv, comment_csv, max_posts=max_posts_target, max_comments_per_post=max_comments_limit, min_year=min_post_year)
                     if kw not in progress_data.setdefault("completed_keywords", []):
                         progress_data["completed_keywords"].append(kw)
                     save_session_progress(session_base_name, progress_data)

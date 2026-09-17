@@ -18,6 +18,8 @@ from datetime import datetime
 
 import requests
 from bs4 import BeautifulSoup
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Folder output default untuk menyimpan seluruh file CSV hasil scraping
 def get_daily_results_dir():
@@ -686,11 +688,10 @@ def search_antara(keyword, max_results=30, session=None):
         resp = req_session.get(url, headers=DEFAULT_HEADERS, timeout=12)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            for art in soup.select('article, .simple-post, .card'):
-                a = art.select_one('a')
-                if a and a.get('href') and 'antaranews.com' in a['href']:
-                    href = a['href']
-                    if '/berita/' in href:
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if 'antaranews.com' in href and '/berita/' in href:
+                    if href not in results:
                         results.append(href)
                 if len(results) >= max_results:
                     break
@@ -731,81 +732,117 @@ def search_tribun(keyword, max_results=30, session=None):
 
 def search_local_media(keyword, max_results=30, session=None):
     """
-    Search Engine Khusus 6 Media Lokal Solo Raya & Klaten:
-    1. Suara Solo (suarasolo.id & surakarta.suara.com)
-    2. Surakarta Raya (surakartaraya.com)
-    3. Lintas Soloraya News (lintassolorayanews.com)
+    Search Engine Khusus Media Lokal Solo Raya & Klaten Terpadu:
+    1. Solopos / Espos.id (Portal Media Utama Solo Raya & Klaten)
+    2. Berita Klaten (beritaklaten.com)
+    3. Suara Solo (suarasolo.id)
     4. Lensa Klaten (lensaklaten.com)
-    5. Kabar Klaten (kabarklaten.com)
-    6. Berita Klaten (beritaklaten.com)
+    5. Fallback Detik Jateng jika kuota belum terpenuhi
     """
     req_session = session or requests.Session()
     results = []
-    quota_per_site = max(4, max_results // 4)
+    quota = max(6, max_results // 3)
 
-    # 1. Direct Search Engine via CMS WordPress (Lensa Klaten, Berita Klaten, Suara Solo)
-    wp_targets = [
-        ("Lensa Klaten", "https://www.lensaklaten.com/"),
-        ("Berita Klaten", "https://beritaklaten.com/"),
-        ("Suara Solo", "https://suarasolo.id/")
-    ]
+    # 1. SOLOPOS / ESPOS.ID (Media Utama Solo Raya & Klaten)
+    solopos_count = 0
+    try:
+        url = f"https://solopos.espos.id/?s={urllib.parse.quote(keyword)}"
+        resp = req_session.get(url, headers=DEFAULT_HEADERS, timeout=6, verify=False)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            for a in soup.select('main a, article a, .post-item a, .card a, h2 a, h3 a'):
+                h = a.get('href', '')
+                if h and ('solopos' in h or 'espos.id' in h) and re.search(r'-\d{5,10}', h):
+                    if h not in results:
+                        results.append(h)
+                        solopos_count += 1
+                if solopos_count >= quota:
+                    break
+    except Exception:
+        pass
 
-    for site_name, base_url in wp_targets:
-        if len(results) >= max_results:
-            break
+    # 2. BERITA KLATEN (Portal Berita Khusus Klaten)
+    bk_count = 0
+    try:
+        url = f"https://beritaklaten.com/?s={urllib.parse.quote(keyword)}"
+        resp = req_session.get(url, headers=DEFAULT_HEADERS, timeout=6, verify=False)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            for a in soup.select('article a, h2 a, h3 a, .entry-title a, .post-title a'):
+                h = a.get('href', '')
+                if h and 'beritaklaten.com' in h and not any(x in h for x in ['/tag/', '/tags/', '/category/', '/author/', '#', '?s=']):
+                    if h not in results:
+                        results.append(h)
+                        bk_count += 1
+                if bk_count >= quota or len(results) >= max_results:
+                    break
+    except Exception:
+        pass
+
+    # 3. SUARA SOLO (suarasolo.id)
+    ss_count = 0
+    try:
+        url = f"https://suarasolo.id/?s={urllib.parse.quote(keyword)}"
+        resp = req_session.get(url, headers=DEFAULT_HEADERS, timeout=4, verify=False)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            for a in soup.select('article a, h2 a, h3 a, .entry-title a'):
+                h = a.get('href', '')
+                if h and 'suarasolo.id' in h and not any(x in h for x in ['/tag/', '/tags/', '/category/', '#', '?s=']):
+                    if h not in results:
+                        results.append(h)
+                        ss_count += 1
+                if ss_count >= quota or len(results) >= max_results:
+                    break
+    except Exception:
+        pass
+
+    # 4. LENSA KLATEN (lensaklaten.com)
+    lk_count = 0
+    try:
+        url = f"https://www.lensaklaten.com/?s={urllib.parse.quote(keyword)}"
+        resp = req_session.get(url, headers=DEFAULT_HEADERS, timeout=3, verify=False)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            for a in soup.select('article a, h2 a, h3 a, .entry-title a'):
+                h = a.get('href', '')
+                if h and 'lensaklaten.com' in h and not any(x in h for x in ['/tag/', '/tags/', '/category/', '#', '?s=']):
+                    if h not in results:
+                        results.append(h)
+                        lk_count += 1
+                if lk_count >= quota or len(results) >= max_results:
+                    break
+    except Exception:
+        pass
+
+    # 5. Jika total artikel masih kurang dari target, ambil sisa artikel dari Solopos
+    if len(results) < max_results:
         try:
-            search_url = f"{base_url}?s={urllib.parse.quote(keyword)}"
-            resp = req_session.get(search_url, headers=DEFAULT_HEADERS, timeout=10)
+            url = f"https://solopos.espos.id/?s={urllib.parse.quote(keyword)}"
+            resp = req_session.get(url, headers=DEFAULT_HEADERS, timeout=6, verify=False)
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, 'html.parser')
-                count = 0
-                for a in soup.select('article a, h2 a, h3 a, .entry-title a, .post-title a, .elementor-post__title a'):
-                    href = a.get('href', '')
-                    if href and href.startswith('http') and not any(x in href for x in ['/tag/', '/tags/', '/category/', '/author/', '#', '?s=']):
-                        if href not in results:
-                            results.append(href)
-                            count += 1
-                    if count >= quota_per_site or len(results) >= max_results:
+                for a in soup.select('main a, article a, .post-item a, .card a, h2 a, h3 a'):
+                    h = a.get('href', '')
+                    if h and ('solopos' in h or 'espos.id' in h) and re.search(r'-\d{5,10}', h):
+                        if h not in results:
+                            results.append(h)
+                    if len(results) >= max_results:
                         break
         except Exception:
             pass
 
-    # 2. Targeted Site Search via DuckDuckGo (Lintas Soloraya, Suara Surakarta, Surakarta Raya, Kabar Klaten)
-    ddg_targets = [
-        "lintassolorayanews.com",
-        "surakarta.suara.com",
-        "surakartaraya.com",
-        "kabarklaten.com"
-    ]
-
-    for domain in ddg_targets:
-        if len(results) >= max_results:
-            break
+    # 6. Fallback regional jika masih kurang: cari di Detik Regional Jateng
+    if len(results) < max_results:
         try:
-            q = f"{keyword} site:{domain}"
-            resp = req_session.post("https://html.duckduckgo.com/html/", data={"q": q}, headers=DEFAULT_HEADERS, timeout=10)
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, 'html.parser')
-                count = 0
-                for el in soup.select('.result'):
-                    title_el = el.select_one('.result__title a')
-                    if not title_el:
-                        continue
-                    href = title_el.get('href', '')
-                    if 'uddg=' in href:
-                        qs = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
-                        if 'uddg' in qs:
-                            href = qs['uddg'][0]
-                    if href and domain in href and not any(x in href for x in ['/tag/', '/tags/', '/search', '/indeks', '/topik/']):
-                        if href not in results:
-                            results.append(href)
-                            count += 1
-                    if count >= quota_per_site or len(results) >= max_results:
-                        break
+            dtk_urls = search_detik(f"{keyword} klaten", max_results=(max_results - len(results)), session=req_session)
+            for u in dtk_urls:
+                if u not in results:
+                    results.append(u)
         except Exception:
             pass
 
-    return results
+    return results[:max_results]
 
 
 # ==========================================
@@ -964,6 +1001,108 @@ def run_news_scraper(keywords, output_name, source_mode="all", max_articles_per_
 
 
 # ==========================================
+# PEMILIHAN SUMBER KATA KUNCI (KEYWORDS)
+# ==========================================
+def load_keywords(filepath="keywords.txt"):
+    """
+    Membaca file kata kunci teks per baris (mengabaikan baris kosong dan komentar '#').
+    """
+    if not os.path.isabs(filepath):
+        filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), filepath)
+    if not os.path.exists(filepath):
+        return []
+    keywords = []
+    with open(filepath, 'r', encoding='utf-8') as f:
+        for line in f:
+            clean = line.strip()
+            if clean and not clean.startswith('#'):
+                keywords.append(clean)
+    return keywords
+
+
+def select_keywords_source(base_dir=None, default_file="keywords.txt"):
+    """
+    Menampilkan menu interaktif pemilihan sumber kata kunci (file keywords*.txt,
+    file manual, atau input kata kunci langsung).
+    Mengembalikan tuple: (list kata kunci, label_sumber).
+    """
+    import glob
+    if base_dir is None:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    candidate_files = sorted(set(glob.glob(os.path.join(base_dir, "keyword*.txt")) + glob.glob(os.path.join(base_dir, "keywords*.txt"))))
+    default_path = os.path.join(base_dir, default_file)
+    if not os.path.exists(default_path) and not candidate_files:
+        candidate_files = [default_path]
+    elif default_path in candidate_files:
+        candidate_files.remove(default_path)
+        candidate_files.insert(0, default_path)
+    elif os.path.exists(default_path):
+        candidate_files.insert(0, default_path)
+
+    file_options = []
+    for c_path in candidate_files:
+        f_name = os.path.basename(c_path)
+        try:
+            c_kws = load_keywords(c_path)
+            cnt = len(c_kws)
+        except Exception:
+            cnt = 0
+        file_options.append((f_name, c_path, cnt))
+
+    print("-" * 55)
+    print("PILIHAN SUMBER KATA KUNCI (KEYWORDS):")
+    for i, (fn, fp, cnt) in enumerate(file_options, 1):
+        label = " [Default]" if i == 1 else ""
+        print(f"  {i}. {fn} ({cnt} kata kunci aktif){label}")
+    print("  M. Masukkan nama file .txt lain secara manual")
+    print("  T. Input kata kunci langsung (pisahkan koma jika > 1)")
+    print("-" * 55)
+
+    choice = input(f"Pilih sumber kata kunci [1-{len(file_options)}/M/T] (default: 1): ").strip()
+    keywords = []
+    source_label = "keywords"
+
+    if not choice or choice == "1":
+        chosen_path = file_options[0][1] if file_options else default_path
+        keywords = load_keywords(chosen_path)
+        source_label = os.path.splitext(os.path.basename(chosen_path))[0]
+        print(f"[*] Menggunakan file: '{os.path.basename(chosen_path)}' ({len(keywords)} kata kunci)")
+    elif choice.isdigit() and 1 <= int(choice) <= len(file_options):
+        chosen_path = file_options[int(choice) - 1][1]
+        keywords = load_keywords(chosen_path)
+        source_label = os.path.splitext(os.path.basename(chosen_path))[0]
+        print(f"[*] Menggunakan file: '{os.path.basename(chosen_path)}' ({len(keywords)} kata kunci)")
+    elif choice.upper() == "M":
+        custom_file = input("Masukkan nama file .txt (contoh: keyword2.txt): ").strip()
+        if custom_file and not custom_file.endswith(".txt"):
+            custom_file += ".txt"
+        chosen_path = os.path.join(base_dir, custom_file) if not os.path.isabs(custom_file) else custom_file
+        if not os.path.exists(chosen_path):
+            print(f"[!] File '{custom_file}' tidak ditemukan di folder script. Menggunakan default 'keywords.txt'.")
+            chosen_path = default_path
+        keywords = load_keywords(chosen_path)
+        source_label = os.path.splitext(os.path.basename(chosen_path))[0]
+        print(f"[*] Menggunakan file: '{os.path.basename(chosen_path)}' ({len(keywords)} kata kunci)")
+    elif choice.upper() == "T":
+        manual_kw = input("Masukkan kata kunci (pisahkan dengan koma jika lebih dari 1): ").strip()
+        if manual_kw:
+            keywords = [k.strip() for k in manual_kw.split(",") if k.strip()]
+            source_label = keywords[0].replace(' ', '_').lower()
+            print(f"[*] Menggunakan {len(keywords)} kata kunci manual: {', '.join(keywords)}")
+    else:
+        chosen_path = file_options[0][1] if file_options else default_path
+        keywords = load_keywords(chosen_path)
+        source_label = os.path.splitext(os.path.basename(chosen_path))[0]
+        print(f"[*] Pilihan tidak dikenal, menggunakan default: '{os.path.basename(chosen_path)}' ({len(keywords)} kata kunci)")
+
+    if not keywords:
+        keywords = ["Bupati Klaten"]
+
+    return keywords, source_label
+
+
+# ==========================================
 # MENU INTERAKTIF TERMINAL
 # ==========================================
 def main_menu():
@@ -974,30 +1113,8 @@ def main_menu():
 ===================================================================
 """)
 
-    # 1. Pilih Sumber Kata Kunci
-    print("Pilih Sumber Keyword:")
-    print("  [1] Input Keyword Manual (satu atau beberapa dipisah koma)")
-    print("  [2] Baca Otomatis dari file 'keywords.txt'")
-    
-    choice_kw = input("Pilihan (1/2) [Default: 2]: ").strip()
-    keywords = []
-
-    if choice_kw == "1":
-        raw_kw = input("\nMasukkan Keyword (contoh: Bupati Klaten, Jalan Rusak Klaten): ").strip()
-        if raw_kw:
-            keywords = [k.strip() for k in raw_kw.split(',') if k.strip()]
-    else:
-        kw_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keywords.txt")
-        if os.path.exists(kw_file):
-            with open(kw_file, 'r', encoding='utf-8') as f:
-                keywords = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-            print(f"  -> Berhasil memuat {len(keywords)} kata kunci dari 'keywords.txt'")
-        else:
-            print("  [!] File 'keywords.txt' tidak ditemukan. Menggunakan keyword default.")
-            keywords = ["Bupati Klaten"]
-
-    if not keywords:
-        keywords = ["Bupati Klaten"]
+    # 1. Pilih Sumber Kata Kunci (Interaktif)
+    keywords, source_label = select_keywords_source()
 
     # 2. Pilih Mesin Pencari / Sumber Media
     print("\nPilih Sumber / Mesin Pencari Media:")
@@ -1031,8 +1148,8 @@ def main_menu():
         max_articles = 25
 
     # 4. Nama File Output
-    default_name = f"media_{keywords[0].replace(' ', '_').lower()}" if keywords else "media_news"
-    name_inp = input(f"Nama File Output CSV [Default: {default_name}]: ").strip()
+    default_name = f"media_{source_label}" if source_label else "media_news"
+    name_inp = input(f"\nNama File Output CSV [Default: {default_name}]: ").strip()
     output_name = name_inp if name_inp else default_name
 
     # Jalankan Scraper

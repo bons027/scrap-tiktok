@@ -636,6 +636,9 @@ def search_kompas(keyword, max_results=30, session=None):
             if resp.status_code != 200:
                 break
             soup = BeautifulSoup(resp.text, 'html.parser')
+            # Hapus sidebar, widget populer, dan footer agar tautan tidak bocor ke berita umum
+            for unwanted in soup.select('aside, .sidebar, .col-bs10-3, footer, header, .popular_right, .terpopuler, .widget'):
+                unwanted.decompose()
             items = soup.select('.article__list, .articleItem, .search__item, .gsc-webResult')
             if not items:
                 break
@@ -664,12 +667,17 @@ def search_solopos(keyword, max_results=30, session=None):
         resp = req_session.get(url, headers=DEFAULT_HEADERS, timeout=12)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            for art in soup.select('article, .post-item, .card, .elementor-post'):
+            # Hapus area sidebar, widget populer, dan footer agar berita sidebar tidak tercampur
+            for unwanted in soup.select('aside, .sidebar, .widget, footer, header, .popular_right, .terpopuler'):
+                unwanted.decompose()
+            # Ambil artikel dari kontainer hasil pencarian utama
+            for art in soup.select('#main article, .site-main article, .content-area article, .search-results article, article, .post-item, .card, .elementor-post'):
                 a = art.select_one('a')
                 if a and a.get('href'):
                     href = a['href']
                     if ('solopos' in href or 'espos.id' in href) and re.search(r'-\d{5,10}', href):
-                        results.append(href)
+                        if href not in results:
+                            results.append(href)
                 if len(results) >= max_results:
                     break
     except Exception:
@@ -688,9 +696,13 @@ def search_antara(keyword, max_results=30, session=None):
         resp = req_session.get(url, headers=DEFAULT_HEADERS, timeout=12)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            for a in soup.find_all('a', href=True):
-                href = a['href']
-                if 'antaranews.com' in href and '/berita/' in href:
+            # Hapus elemen sidebar, terpopuler, dan footer Antara
+            for unwanted in soup.select('aside, .sidebar, .popular_right, .terpopuler, footer, header, nav'):
+                unwanted.decompose()
+            # Ambil hanya dari kartu daftar hasil pencarian resmi
+            for a in soup.select('.wrapper__list__article h3 a, .wrapper__list__article h2 a, .card__post h3 a, .card__post h2 a, .post_title a, .simple-thumb a'):
+                href = a.get('href', '')
+                if 'antaranews.com' in href and ('/berita/' in href or '/video/' in href):
                     if href not in results:
                         results.append(href)
                 if len(results) >= max_results:
@@ -846,22 +858,105 @@ def search_local_media(keyword, max_results=30, session=None):
 
 
 # ==========================================
+# VALIDATOR RELEVANSI BERITA (ANTI-BOCOR)
+# ==========================================
+def is_news_relevant(keyword, description, tags="", url=""):
+    """
+    Validasi ketat relevansi artikel berita terhadap kata kunci pencarian.
+    Mencegah kebocoran berita (false positives) seperti berita umum nasional,
+    berita sidebar populer, atau penyebutan sekilas 1 kata di artikel luar daerah.
+    """
+    if not keyword or not keyword.strip():
+        return True
+
+    kw_raw = keyword.strip()
+    kw_lower = kw_raw.lower()
+    desc_lower = (description or "").lower()
+    tags_lower = (tags or "").lower()
+    url_lower = (url or "").lower()
+
+    # Ekstrak judul dari format [JUDUL] ... \n\n[BERITA] ...
+    title_line = ""
+    if "[judul]" in desc_lower:
+        parts = desc_lower.split("[judul]")
+        if len(parts) > 1:
+            title_line = parts[1].split("[berita]")[0].strip()
+    if not title_line and description:
+        title_line = desc_lower.split("\n")[0].strip()
+
+    tokens = [w for w in re.findall(r'\b\w+\b', kw_lower) if len(w) >= 2]
+    if not tokens:
+        return True
+
+    # Kasus 1 Kata (contoh: "Hamenang", "BKK", "Desil")
+    if len(tokens) == 1:
+        token = tokens[0]
+        # 1. Jika token ada di Judul atau Tags -> 100% RELEVAN
+        if token in title_line or token in tags_lower:
+            return True
+        # 2. Jika token ada di path URL -> 100% RELEVAN
+        if token in url_lower:
+            return True
+        # 3. Jika hanya ada di Isi Berita:
+        #    Pastikan bukan penyebutan sekilas di artikel nasional/luar daerah.
+        #    Wajib muncul minimal 2x, ATAU muncul di paragraf awal (lead) dengan konteks daerah.
+        kw_count = desc_lower.count(token)
+        if kw_count >= 2:
+            return True
+        if kw_count == 1:
+            early_text = desc_lower[:600]
+            if token in early_text:
+                local_contexts = ['klaten', 'bupati', 'solo', 'jateng', 'jawa tengah', 'pemkab', 'dprd']
+                if any(lc in desc_lower for lc in local_contexts):
+                    return True
+        return False
+
+    # Kasus Multi-Kata (contoh: "Jalan Rusak Klaten", "Bansos Klaten", "TPA Troketon")
+    # Entitas unik utama
+    primary_entities = [t for t in tokens if t in ['hamenang', 'troketon', 'desil', 'bkk', 'mbg', 'pkh', 'blt']]
+    if primary_entities:
+        for ent in primary_entities:
+            if ent in title_line or ent in tags_lower or desc_lower.count(ent) >= 2:
+                return True
+            if ent in desc_lower[:600]:
+                return True
+
+    # Non-geografis tokens
+    non_geo = [t for t in tokens if t not in ['klaten', 'kabupaten', 'kota', 'daerah', 'jateng', 'jawa', 'tengah']]
+    if non_geo:
+        if not all(t in desc_lower for t in non_geo):
+            return False
+        in_title_or_tags = any(t in title_line or t in tags_lower for t in non_geo)
+        has_geo_in_kw = any(g in kw_lower for g in ['klaten', 'jateng', 'solo'])
+        if has_geo_in_kw:
+            has_geo_in_article = any(g in desc_lower or g in url_lower for g in ['klaten', 'solo', 'jateng', 'jawa tengah'])
+            return in_title_or_tags or has_geo_in_article
+        return in_title_or_tags or all(desc_lower.count(t) >= 2 for t in non_geo)
+
+    return all(t in desc_lower for t in tokens)
+
+
+# ==========================================
 # MULTI-SOURCE SEARCH DISPATCHER
 # ==========================================
 def fetch_article_urls_for_keyword(keyword, source_mode="all", max_articles=30):
     """
     Mencari daftar URL artikel berita berdasarkan keyword & pilihan mesin pencari.
+    Menghasilkan buffer candidate URLs yang cukup untuk disaring relevansinya.
     """
     session = requests.Session()
     urls = []
 
     print(f"  🔍 Menghubungi Search Engine untuk keyword: '{keyword}'...")
 
+    # Ambil buffer kandidat lebih banyak agar target kuota terpenuhi setelah filter relevansi
+    fetch_target = max(30, max_articles * 2)
+
     if source_mode == "all":
         # Multi-engine aggregator: Media Lokal + DDG + Solopos + Detik + Kompas + Antara
-        target_per_source = max(5, max_articles // 4)
+        target_per_source = max(10, fetch_target // 4)
         local_urls = search_local_media(keyword, max_results=target_per_source, session=session)
-        ddg_urls = search_duckduckgo(keyword, max_results=max_articles, session=session)
+        ddg_urls = search_duckduckgo(keyword, max_results=fetch_target, session=session)
         solopos_urls = search_solopos(keyword, max_results=target_per_source, session=session)
         detik_urls = search_detik(keyword, max_results=target_per_source, session=session)
         kompas_urls = search_kompas(keyword, max_results=target_per_source, session=session)
@@ -873,21 +968,21 @@ def fetch_article_urls_for_keyword(keyword, source_mode="all", max_articles=30):
                 if u not in urls:
                     urls.append(u)
     elif source_mode == "local":
-        urls = search_local_media(keyword, max_results=max_articles, session=session)
+        urls = search_local_media(keyword, max_results=fetch_target, session=session)
     elif source_mode == "ddg":
-        urls = search_duckduckgo(keyword, max_results=max_articles, session=session)
+        urls = search_duckduckgo(keyword, max_results=fetch_target, session=session)
     elif source_mode == "detik":
-        urls = search_detik(keyword, max_results=max_articles, session=session)
+        urls = search_detik(keyword, max_results=fetch_target, session=session)
     elif source_mode == "kompas":
-        urls = search_kompas(keyword, max_results=max_articles, session=session)
+        urls = search_kompas(keyword, max_results=fetch_target, session=session)
     elif source_mode == "solopos":
-        urls = search_solopos(keyword, max_results=max_articles, session=session)
+        urls = search_solopos(keyword, max_results=fetch_target, session=session)
     elif source_mode == "antara":
-        urls = search_antara(keyword, max_results=max_articles, session=session)
+        urls = search_antara(keyword, max_results=fetch_target, session=session)
     elif source_mode == "tribun":
-        urls = search_tribun(keyword, max_results=max_articles, session=session)
+        urls = search_tribun(keyword, max_results=fetch_target, session=session)
 
-    return urls[:max_articles]
+    return urls[:fetch_target]
 
 
 # ==========================================
@@ -908,18 +1003,19 @@ def save_article_to_csv(article_data, posts_csv_path):
 
 def init_comments_csv(comments_csv_path):
     """
-    Membuat file CSV komentar pasangan agar format 100% konsisten dengan TikTok & Facebook.
+    Menginisialisasi file CSV komentar portal berita jika belum ada.
     """
     with csv_lock:
         if not os.path.exists(comments_csv_path) or os.path.getsize(comments_csv_path) == 0:
             with open(comments_csv_path, mode='w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(COMMENTS_CSV_HEADER)
+                writer = csv.DictWriter(f, fieldnames=COMMENTS_CSV_HEADER)
+                writer.writeheader()
 
 
 def run_news_scraper(keywords, output_name, source_mode="all", max_articles_per_keyword=30, delay=1.0):
     """
     Menjalankan alur scraping portal berita online untuk daftar keyword yang ditentukan.
+    Dilengkapi filter anti-bocor untuk menjamin relevansi artikel 100%.
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_output_name = re.sub(r'[\\/*?:"<>| ]', '_', output_name.strip())
@@ -942,6 +1038,7 @@ def run_news_scraper(keywords, output_name, source_mode="all", max_articles_per_
     print(f"  🔑 Jumlah Kata Kunci : {len(keywords)}")
     print(f"  🎯 Target per Keyword: {max_articles_per_keyword} artikel")
     print(f"  🌐 Mode Search Engine: {source_mode.upper()}")
+    print("  🛡️ Filter Anti-Bocor  : AKTIF (Hanya artikel relevan kata kunci)")
     print("  ⌨️  Kontrol Keyboard   : Tekan [P] untuk Jeda, [Q] untuk Berhenti")
     print("=" * 65 + "\n")
 
@@ -952,7 +1049,7 @@ def run_news_scraper(keywords, output_name, source_mode="all", max_articles_per_
         print(f"\n[{kw_idx}/{len(keywords)}] Memproses Kata Kunci: '{kw}'")
         article_urls = fetch_article_urls_for_keyword(kw, source_mode=source_mode, max_articles=max_articles_per_keyword)
         
-        print(f"  📋 Ditemukan {len(article_urls)} tautan artikel berita.")
+        print(f"  📋 Ditemukan {len(article_urls)} tautan kandidat artikel berita.")
 
         kw_scraped = 0
         for url_idx, url in enumerate(article_urls, 1):
@@ -970,6 +1067,14 @@ def run_news_scraper(keywords, output_name, source_mode="all", max_articles_per_
             if not article_data:
                 continue
 
+            # VALIDASI RELEVANSI KATA KUNCI (ANTI-BOCOR)
+            if not is_news_relevant(kw, article_data.get('description', ''), article_data.get('hashtags_used', ''), url):
+                headline_preview = article_data['description'].split('\n')[0].replace('[JUDUL] ', '')
+                if len(headline_preview) > 50:
+                    headline_preview = headline_preview[:47] + "..."
+                print(f"  [-] ⚠️ [DILEWATI/TIDAK RELEVAN] [{article_data['platform']}] {headline_preview}")
+                continue
+
             article_data["search_keyword"] = kw
             save_article_to_csv(article_data, posts_csv_path)
             
@@ -980,7 +1085,7 @@ def run_news_scraper(keywords, output_name, source_mode="all", max_articles_per_
             if len(headline_preview) > 55:
                 headline_preview = headline_preview[:52] + "..."
 
-            print(f"  [{kw_scraped}/{len(article_urls)}] ✅ [{article_data['platform']}] {headline_preview} ({article_data['post_date'][:10]})")
+            print(f"  [{kw_scraped}/{max_articles_per_keyword}] ✅ [{article_data['platform']}] {headline_preview} ({article_data['post_date'][:10]})")
 
             # Jeda sopan antar request
             pause_ctrl.sleep(random.uniform(delay * 0.8, delay * 1.3))

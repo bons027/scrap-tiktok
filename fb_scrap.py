@@ -484,7 +484,7 @@ def is_mode1_keyword_relevant(post_text, author="", keyword="", card_full_text="
     # 1. Mode Frasa Persis jika diapit tanda kutip: "kata kunci" atau 'kata kunci'
     if (kw_raw.startswith('"') and kw_raw.endswith('"')) or (kw_raw.startswith("'") and kw_raw.endswith("'")):
         phrase = kw_raw[1:-1].strip().lower()
-        return phrase in core_content or (phrase in content and len(txt) > 0)
+        return phrase in core_content or phrase in clean_card
 
     # 2. Cek kemunculan di core_content (author + post_text)
     if kw_lower in core_content:
@@ -497,13 +497,13 @@ def is_mode1_keyword_relevant(post_text, author="", keyword="", card_full_text="
 
     # Jika hanya 1 kata (misal: "hamenang", "bkk", "desil")
     if len(tokens) == 1:
-        return tokens[0] in core_content or (tokens[0] in clean_card and len(txt) >= 5)
+        return tokens[0] in core_content or tokens[0] in clean_card
 
     # 4. Multi-kata:
     # A. Cek entitas utama unik ('hamenang', 'troketon', 'desil', 'bkk', 'mbg', 'pkh', 'blt')
     primary_entities = [t for t in tokens if t in ['hamenang', 'troketon', 'desil', 'bkk', 'mbg', 'pkh', 'blt']]
     for ent in primary_entities:
-        if ent in core_content or (ent in clean_card and len(txt) >= 5):
+        if ent in core_content or ent in clean_card:
             return True
 
     # B. Cek topik isu non-geografis (misal 'jalan rusak klaten' -> 'jalan' & 'rusak')
@@ -513,11 +513,11 @@ def is_mode1_keyword_relevant(post_text, author="", keyword="", card_full_text="
         if all(t in target_eval for t in non_geo_tokens):
             return True
     elif len(non_geo_tokens) == 1:
-        if non_geo_tokens[0] in core_content or (non_geo_tokens[0] in clean_card and len(txt) >= 5):
+        if non_geo_tokens[0] in core_content or non_geo_tokens[0] in clean_card:
             return True
 
     # C. Fallback rasio kecocokan token >= 60%
-    matched_tokens = [t for t in tokens if t in core_content]
+    matched_tokens = [t for t in tokens if t in core_content or t in clean_card]
     if len(matched_tokens) / len(tokens) >= 0.6:
         return True
 
@@ -1483,8 +1483,16 @@ def close_search_dialog(driver, search_url=None):
         try:
             curr = driver.current_url.lower()
             if '/search/' not in curr:
-                driver.get(search_url)
-                time.sleep(2.0)
+                # Coba history.back() terlebih dahulu agar posisi scroll feed tidak reset
+                try:
+                    driver.execute_script("window.history.back();")
+                    time.sleep(1.0)
+                except Exception:
+                    pass
+                curr2 = driver.current_url.lower()
+                if '/search/' not in curr2:
+                    driver.get(search_url)
+                    time.sleep(2.0)
         except Exception:
             pass
 
@@ -2693,11 +2701,12 @@ def extract_standalone_post_details(driver):
 def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20, max_comments_per_post=150, min_year=2025):
     """
     Workflow Khusus Mode 1: Pencarian Otomatis Kata Kunci Isu Daerah Facebook.
-    1. Membuka feed pencarian Facebook untuk kata kunci dengan presisi tinggi.
-    2. Mendeteksi postingan di feed, mengekstrak URL permalink (mendukung pfbid modern).
-    3. Memfilter relevansi secara akurat (on point, anti-false-positive, anti-false-negative).
-    4. Menyedot komentar dengan membuka postingan di tab terisolasi tanpa merusak scroll feed pencarian.
-    5. Menyimpan metadata postingan dan seluruh komentar/balasan secara lengkap ke CSV.
+    1. Membuka feed pencarian Facebook untuk kata kunci dengan URL bersih tanpa filter rusak.
+    2. Mendeteksi seluruh kartu postingan di feed secara menyeluruh (termasuk post Comet modern).
+    3. Mengekstrak URL permalink canonical secara presisi melalui interaksi dialog/tombol komentar.
+    4. Memfilter relevansi secara akurat (on point, anti-false-positive, anti-false-negative).
+    5. Menyedot komentar lengkap dan balasan sampai tuntas, lalu menutup dialog tanpa me-reload feed.
+    6. Menggunakan scroll berbasis WheelEvent agar feed pencarian terus memuat kartu baru tanpa macet.
     """
     seen_signatures, seen_post_ids, seen_post_urls, seen_comment_keys = load_all_existing_sheet_data(post_csv, comment_csv)
 
@@ -2705,8 +2714,7 @@ def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_p
     total_comments_saved = 0
     empty_scrolls = 0
 
-    search_url_chrono = f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(keyword)}&filters={FB_CHRONOSORT_FILTER}"
-    search_url_standard = f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(keyword)}"
+    search_url = f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(keyword)}"
 
     max_label = f"{max_posts} Postingan" if max_posts > 0 else "Tanpa Batas (Ambil Semua)"
     com_label = f"{max_comments_per_post} Komentar / Post" if max_comments_per_post > 0 else "Tanpa Batas (Ambil Semua)"
@@ -2722,37 +2730,26 @@ def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_p
     print(f"    - Komentar : {comment_csv}")
     print("=" * 65)
 
-    # 1. Buka URL pencarian chronosort
+    # 1. Buka URL pencarian Facebook standar
     try:
-        driver.get(search_url_chrono)
+        driver.get(search_url)
         pause_ctrl.sleep(3.5)
     except Exception as e:
         print(f"  [!] Gagal membuka URL pencarian: {e}")
         return
 
     # Periksa apakah halaman rusak / dialihkan
-    is_broken, broken_reason = is_page_or_group_broken(driver, expected_url=search_url_chrono)
+    is_broken, broken_reason = is_page_or_group_broken(driver, expected_url=search_url)
     if is_broken:
-        print(f"  [!] Halaman pencarian terindikasi terganggu ({broken_reason}). Mencoba pencarian standar...")
+        print(f"  [!] Halaman pencarian terindikasi terganggu ({broken_reason}). Mencoba membuka ulang...")
         try:
-            driver.get(search_url_standard)
+            driver.get(search_url)
             pause_ctrl.sleep(3.0)
         except Exception:
             pass
 
-    # Periksa apakah feed kosong dengan filter chronosort, jika ya gunakan pencarian standar
-    has_feed = driver.execute_script("""
-        let articles = document.querySelectorAll('div[role="feed"] > div, div[role="article"]');
-        return articles.length > 0;
-    """)
-    if not has_feed:
-        print("  [*] Mengaktifkan pencarian standar Facebook untuk memaksimalkan hasil relevan...")
-        try:
-            driver.get(search_url_standard)
-            pause_ctrl.sleep(3.0)
-            apply_recent_posts_filter(driver)
-        except Exception:
-            pass
+    # Coba aktifkan filter 'Terbaru' jika switch tersedia di DOM
+    apply_recent_posts_filter(driver)
 
     search_tab_handle = driver.current_window_handle
 
@@ -2770,6 +2767,22 @@ def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_p
                     except Exception:
                         pass
             driver.switch_to.window(search_tab_handle)
+
+        # Tutup sisa modal dialog jika masih menutupi layar
+        try:
+            has_dialog = driver.execute_script("return !!document.querySelector('div[role=\"dialog\"], div[aria-modal=\"true\"], div[data-pagelet*=\"Tahoe\"]');")
+            if has_dialog:
+                driver.execute_script("""
+                    let closeBtn = document.querySelector('div[aria-label="Tutup"], div[aria-label="Close"], div[aria-label*="Tutup" i], div[aria-label*="Close" i]');
+                    if (closeBtn) closeBtn.click();
+                """)
+                time.sleep(0.3)
+                try:
+                    ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # Cari postingan berikutnya yang belum diproses dari feed pencarian
         next_post = driver.execute_script("""
@@ -2795,10 +2808,9 @@ def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_p
             }
 
             function getPostCards() {
-                let candidates = document.querySelectorAll('div[role="feed"] > div, div[role="article"]');
-                if (candidates.length === 0) {
-                    candidates = document.querySelectorAll('div[data-ad-preview="message"], div[class*="x1yztbdb"]');
-                }
+                let candidates = Array.from(document.querySelectorAll(
+                    'div[role="feed"] > div, div[role="article"], div[data-pagelet*="Search"] > div, div[data-pagelet*="FeedUnit"], div[class*="x1yztbdb"]'
+                ));
                 let postCards = [];
                 for (let c of candidates) {
                     if (!c || c.offsetHeight < 60) continue;
@@ -2829,14 +2841,11 @@ def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_p
                 let hasPostMessage = !!p.querySelector('div[data-ad-preview="message"], div[data-ad-comet-preview="message"], div[data-testid="post_message"]');
                 let hasVideo = !!p.querySelector('video, div[data-video-id], [aria-label*="Video" i], [aria-label*="Reel" i], [aria-label*="Putar" i], [aria-label*="Play" i]');
 
-                // Lewati widget non-post
+                // Lewati widget non-post murni
                 let isWidget = !hasVideo && (
                     cardLower === 'ikuti' || cardLower === 'follow' || cardLower === 'tambah jadi teman' || cardLower === 'gabung' ||
                     cardLower.startsWith('orang yang mungkin anda kenal') ||
                     cardLower.startsWith('saran untuk anda') ||
-                    cardLower.startsWith('hasil untuk') ||
-                    cardLower.startsWith('menampilkan hasil') ||
-                    cardLower.startsWith('filter') ||
                     (cardLower.includes('tambah jadi teman') && !hasPostLink) ||
                     (!hasPostLink && !hasPostMessage && (cardLower.includes('ikuti') || cardLower.includes('follow') || cardLower.includes('gabung')))
                 );
@@ -2924,12 +2933,15 @@ def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_p
 
                 // Author
                 let author = 'Warga / Anonim';
-                let authorEl = p.querySelector('h2 a, h3 a, h4 a, h2 strong, h3 strong, h4 strong, a strong, strong span, a[role="link"] span, h2, h3');
+                let authorEl = p.querySelector(
+                    'h2 a, h3 a, h4 a, h2 strong, h3 strong, h4 strong, a strong, strong span, a[role="link"] span, h2, h3, ' +
+                    'a[role="link"][href*="/user/"], a[role="link"][href*="/profile.php"], a[role="link"][tabindex="0"]'
+                );
                 if (authorEl) {
                     let resolvedAuth = resolveElementTextWithSvg(authorEl);
                     if (resolvedAuth) {
                         let cleanA = resolvedAuth.split('\\n')[0].replace(/·\\s*(?:Ikuti|Follow|Gabung|Join|Disponsori|Sponsored).*$/i, '').trim();
-                        if (cleanA && !cleanA.toLowerCase().startsWith('hasil untuk') && cleanA.toLowerCase() !== 'facebook') {
+                        if (cleanA && !cleanA.toLowerCase().startsWith('hasil untuk') && cleanA.toLowerCase() !== 'facebook' && cleanA.length < 60) {
                             author = cleanA;
                         }
                     }
@@ -3089,6 +3101,7 @@ def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_p
                     }
                 }
 
+                p.setAttribute('data-target-post', 'true');
                 p.setAttribute('data-fb-seen', 'true');
 
                 return {
@@ -3104,7 +3117,8 @@ def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_p
                     shares_count: 0,
                     plays_count: 0,
                     is_video: isVideoPost,
-                    card_full_text: cardFullText
+                    card_full_text: cardFullText,
+                    needs_click: !postUrl
                 };
             }
 
@@ -3113,7 +3127,7 @@ def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_p
 
         if not next_post:
             empty_scrolls += 1
-            perform_feed_scroll(driver, distance=random.randint(700, 900))
+            perform_search_feed_scroll(driver, distance=random.randint(700, 950))
             pause_ctrl.sleep(random.uniform(1.4, 2.0))
             continue
 
@@ -3129,6 +3143,85 @@ def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_p
         p_is_video = bool(next_post.get('is_video', False))
         p_comments_count = next_post.get('comments_count', 0)
         p_reactions_count = next_post.get('reactions_count', 0)
+        needs_click = bool(next_post.get('needs_click', False))
+
+        post_comments = []
+        dialog_opened_in_feed = False
+
+        # JIKA URL BELUM DITEMUKAN: Klik tombol komentar kartu untuk membuka dialog & mendapatkan URL asli
+        if needs_click or not is_specific_post_url(p_url):
+            try:
+                driver.execute_script("""
+                    let p = document.querySelector('[data-target-post="true"]');
+                    if (!p) return;
+                    p.removeAttribute('data-target-post');
+
+                    let btns = Array.from(p.querySelectorAll('div[role="button"], span[role="button"]'));
+                    let comBtn = btns.find(b => {
+                        let aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                        let txt = (b.innerText || '').toLowerCase();
+                        return aria.includes('komentar') || aria.includes('comment') || txt.includes('komentar') || txt.includes('comment');
+                    });
+                    if (comBtn) {
+                        comBtn.click();
+                        return;
+                    }
+
+                    // Fallback klik anchor permalink/waktu
+                    let tsAnchor = p.querySelector('a[href*="__cft__"], a[role="link"]');
+                    if (tsAnchor) {
+                        tsAnchor.click();
+                        return;
+                    }
+                """)
+                pause_ctrl.sleep(random.uniform(2.0, 2.8))
+
+                dialog_info = driver.execute_script("""
+                    let cur = window.location.href || '';
+                    let dialog = document.querySelector('div[role="dialog"], div[aria-modal="true"], div[data-pagelet*="Tahoe"]');
+                    let canonUrl = '';
+                    if (cur && !cur.includes('/search/') && !cur.includes('/search?')) {
+                        canonUrl = cur;
+                    } else if (dialog) {
+                        let dLinks = Array.from(dialog.querySelectorAll('a[href]')).map(a => a.href).filter(h =>
+                            (h.includes('/posts/') || h.includes('/permalink/') || h.includes('/videos/') || h.includes('/reel/') || h.includes('/photo/')) && !h.includes('/search/')
+                        );
+                        if (dLinks.length > 0) canonUrl = dLinks[0];
+                    }
+                    return {
+                        has_dialog: !!dialog,
+                        canon_url: canonUrl
+                    };
+                """)
+
+                if dialog_info and dialog_info.get('has_dialog'):
+                    dialog_opened_in_feed = True
+                    if dialog_info.get('canon_url'):
+                        p_url = dialog_info['canon_url']
+
+                    # Ambil detail tambahan langsung dari dialog
+                    updated_details = extract_standalone_post_details(driver)
+                    if updated_details:
+                        up_txt = updated_details.get('post_text', '')
+                        if up_txt and len(up_txt) > len(p_text):
+                            p_text = up_txt
+                        up_auth = updated_details.get('author_name', '')
+                        if up_auth and up_auth != 'Warga / Anonim':
+                            p_author = up_auth
+                        up_date = updated_details.get('post_date', '')
+                        if up_date and up_date != 'Terkini':
+                            p_date = up_date
+                        up_com = updated_details.get('comments_count', 0)
+                        if up_com > p_comments_count:
+                            p_comments_count = up_com
+                        up_react = updated_details.get('reactions_count', 0)
+                        if up_react > p_reactions_count:
+                            p_reactions_count = up_react
+                        up_url = updated_details.get('post_url', '')
+                        if up_url and is_specific_post_url(up_url):
+                            p_url = up_url
+            except Exception as click_err:
+                pass
 
         # Standardisasi URL jika belum canonical
         if p_url:
@@ -3140,16 +3233,22 @@ def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_p
         is_spec_url = is_specific_post_url(clean_url)
         if p_sig in seen_signatures or (p_id and p_id in seen_post_ids) or (is_spec_url and clean_url in seen_post_urls):
             seen_signatures.add(p_sig)
+            if dialog_opened_in_feed:
+                close_search_dialog(driver, search_url=search_url)
             print(f"  [SUDAH ADA DI SHEET] Dilewati @{p_author}: \"{p_text[:40]}...\"")
             continue
 
         # Filter Tahun
         if is_outdated_post(p_date, min_year=min_year):
+            if dialog_opened_in_feed:
+                close_search_dialog(driver, search_url=search_url)
             print(f"  [DILEWATI] Postingan Usang ({p_date}) @{p_author}: \"{p_text[:40]}...\" (Filter aktif: Hanya tahun {min_year}+)")
             continue
 
         # Filter Kata Kunci Khusus Mode 1 (On Point & Anti-Terlewat)
         if not is_mode1_keyword_relevant(p_text, author=p_author, keyword=keyword, card_full_text=p_card_full):
+            if dialog_opened_in_feed:
+                close_search_dialog(driver, search_url=search_url)
             short_txt = (p_text or p_card_full or '').strip().replace('\n', ' ')
             preview = f'"{short_txt[:40]}..."' if short_txt else '<Tanpa Teks>'
             print(f"  [DILEWATI] Tidak Memuat Kata Kunci '{keyword}' @{p_author}: {preview}")
@@ -3167,21 +3266,39 @@ def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_p
         print(f"  * URL Postingan: {p_url or '<Tidak Ditemukan>'}")
         print(f"  \"{p_text[:75]}...\"")
 
-        # Ekstraksi Komentar via Tab Terisolasi
-        post_comments = []
-        if p_url and is_specific_post_url(p_url):
+        # Ekstraksi Komentar:
+        # A. Jika dialog sudah terbuka di feed pencarian, sedot komentar langsung di dalam dialog!
+        if dialog_opened_in_feed:
+            print("  [*] Mengambil komentar dan membuka balasan langsung dari dialog aktif...")
+            try:
+                switch_filter_to_all_comments(driver)
+                post_comments = exhaustively_scroll_and_extract_comments(
+                    driver, max_idle_scrolls=3, max_total_comments_limit=max_comments_per_post,
+                    seen_comment_keys=seen_comment_keys, current_post_text=p_text
+                )
+                if post_comments:
+                    p_comments_count = max(p_comments_count, len(post_comments))
+            except Exception as d_com_err:
+                pass
+            finally:
+                close_search_dialog(driver, search_url=search_url)
+
+        # B. Jika belum terbuka tapi p_url adalah permalink spesifik, buka di tab terisolasi
+        elif p_url and is_specific_post_url(p_url):
             print("  [*] Membuka postingan di tab terpisah untuk menyedot komentar...")
             try:
                 driver.switch_to.new_window('tab')
                 driver.get(p_url)
                 pause_ctrl.sleep(random.uniform(2.5, 3.5))
 
-                # Ambil detail tambahan dari halaman postingan langsung
                 updated_details = extract_standalone_post_details(driver)
                 if updated_details:
                     up_txt = updated_details.get('post_text', '')
                     if up_txt and len(up_txt) > len(p_text):
                         p_text = up_txt
+                    up_auth = updated_details.get('author_name', '')
+                    if up_auth and up_auth != 'Warga / Anonim':
+                        p_author = up_auth
                     up_date = updated_details.get('post_date', '')
                     if up_date and up_date != 'Terkini':
                         p_date = up_date
@@ -3192,10 +3309,7 @@ def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_p
                     if up_react > p_reactions_count:
                         p_reactions_count = up_react
 
-                # Ubah filter ke Semua Komentar
                 switch_filter_to_all_comments(driver)
-
-                # Ambil seluruh komentar & bongkar balasan sampai tuntas
                 post_comments = exhaustively_scroll_and_extract_comments(
                     driver, max_idle_scrolls=4, max_total_comments_limit=max_comments_per_post,
                     seen_comment_keys=seen_comment_keys, current_post_text=p_text
@@ -3257,9 +3371,9 @@ def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_p
             total_comments_saved += 1
             print(f"  [+] Selesai Post #{total_posts_saved}. Link postingan ({p_url}) berhasil dicatat ke file komentar & postingan!")
 
-        # Scroll sedikit feed pencarian agar lazy loader terus memuat kartu baru
-        perform_feed_scroll(driver, distance=random.randint(450, 650))
-        pause_ctrl.sleep(random.uniform(0.8, 1.4))
+        # Scroll feed pencarian dengan WheelEvent agar lazy loader Facebook terus memuat kartu baru
+        perform_search_feed_scroll(driver, distance=random.randint(600, 850))
+        pause_ctrl.sleep(random.uniform(1.0, 1.6))
 
     print(f"\n[*] Selesai memproses kata kunci '{keyword}'. Total {total_posts_saved} postingan & {total_comments_saved} baris komentar dicatat.")
 

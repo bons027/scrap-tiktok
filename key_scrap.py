@@ -231,6 +231,34 @@ def get_chrome_major_version(chrome_path):
         pass
     return None
 
+def cleanup_zombie_chrome():
+    """
+    Membersihkan sisa proses chrome.exe & chromedriver.exe scraper dari sesi sebelumnya
+    yang tertinggal (zombie) serta menghapus lock file profil.
+    Aman: Hanya menghentikan proses yang lokasinya berada di folder proyek ini.
+    """
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    profiles = [os.path.join(base_dir, "tiktok_chrome_profile")]
+    profiles.extend([os.path.join(base_dir, f"tiktok_chrome_profile_w{i}") for i in range(1, 10)])
+
+    for p in profiles:
+        if os.path.exists(p):
+            for root, dirs, files in os.walk(p):
+                for f in files:
+                    if f in ["lockfile", "SingletonLock", "SingletonCookie", "SingletonSocket"] or f.endswith(".lock"):
+                        try:
+                            os.remove(os.path.join(root, f))
+                        except Exception:
+                            pass
+
+    if sys.platform == "win32":
+        try:
+            b_clean = base_dir.replace('\\', '/')
+            cmd = f'Get-Process -Name chrome, chromedriver -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -and ($_.Path.Replace("\\\\", "/") -like "*{b_clean}*") }} | Stop-Process -Force'
+            subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, timeout=6)
+        except Exception:
+            pass
+
 def get_driver(worker_id=0):
     """
     Inisialisasi browser undetected-chromedriver dengan profil terisolasi per worker.
@@ -249,16 +277,26 @@ def get_driver(worker_id=0):
         profile_dir = master_profile
     else:
         profile_dir = os.path.join(base_dir, f"tiktok_chrome_profile_w{worker_id}")
-        # Salin sesi dari profil master ke profil worker jika worker belum punya profil
-        if not os.path.exists(profile_dir) and os.path.exists(master_profile):
-            try:
-                shutil.copytree(
-                    master_profile, profile_dir, dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns('*.lock', 'lockfile', 'Singleton*', 'RunningChromeVersion')
-                )
-            except Exception:
-                pass
         os.makedirs(profile_dir, exist_ok=True)
+        # Salin / sinkronisasi sesi dari profil master ke profil worker
+        if os.path.exists(master_profile):
+            for rel_sub in [
+                os.path.join("Default", "Network", "Cookies"),
+                os.path.join("Default", "Cookies"),
+                os.path.join("Default", "Local Storage"),
+                os.path.join("Default", "Session Storage")
+            ]:
+                src_f = os.path.join(master_profile, rel_sub)
+                dst_f = os.path.join(profile_dir, rel_sub)
+                if os.path.exists(src_f):
+                    try:
+                        if os.path.isdir(src_f):
+                            shutil.copytree(src_f, dst_f, dirs_exist_ok=True)
+                        else:
+                            os.makedirs(os.path.dirname(dst_f), exist_ok=True)
+                            shutil.copy2(src_f, dst_f)
+                    except Exception:
+                        pass
 
     options = uc.ChromeOptions()
     options.add_argument("--no-sandbox")
@@ -514,6 +552,7 @@ def perform_human_scroll(driver, distance=800):
 def dismiss_guest_popup(driver):
     """
     Menghilangkan popup login jika scraping berjalan dalam mode guest.
+    Aman: Tidak menyembunyikan captcha verifikasi agar user tetap bisa menyelesaikan puzzle.
     """
     try:
         try:
@@ -536,6 +575,11 @@ def dismiss_guest_popup(driver):
             for (let s of selectors) {
                 document.querySelectorAll(s).forEach(el => {
                     try {
+                        let inner = (el.innerText || '').toLowerCase();
+                        let cls = (el.className || '').toString().toLowerCase();
+                        if (cls.includes('captcha') || el.querySelector('.captcha-verify-container, [class*="captcha"]') || inner.includes('puzzle') || inner.includes('captcha') || inner.includes('drag the puzzle') || inner.includes('geser')) {
+                            return; // JANGAN SEMBUNYIKAN CAPTCHA AGAR BISA DISELESAIKAN USER!
+                        }
                         el.style.setProperty('display', 'none', 'important');
                         el.style.setProperty('visibility', 'hidden', 'important');
                         el.style.setProperty('pointer-events', 'none', 'important');
@@ -556,6 +600,53 @@ def dismiss_guest_popup(driver):
         """)
     except Exception:
         pass
+
+
+def check_and_wait_for_captcha(driver, timeout=60, worker_prefix=""):
+    """
+    Mendeteksi jika TikTok memunculkan captcha slider/puzzle ('Drag the puzzle piece into place' /
+    'Select 2 objects with the same shape' / 'captcha-verify-container').
+    Memberi tahu user di terminal dan menunggu hingga user menyelesaikan puzzle tersebut.
+    """
+    w_tag = f"[{worker_prefix}] " if worker_prefix else ""
+    try:
+        is_captcha = driver.execute_script("""
+            let text = document.body ? document.body.innerText : '';
+            let hasCaptchaText = text.includes('Drag the puzzle piece') || 
+                                 text.includes('Geser potongan puzzle') || 
+                                 text.includes('Select 2 objects') ||
+                                 text.includes('Pilih 2 objek');
+            let hasCaptchaEl = document.querySelector('.captcha-verify-container, [class*="captcha-verify"], [class*="captcha_verify"], #captcha_container') !== null;
+            let isModalActive = false;
+            if (hasCaptchaEl) {
+                let el = document.querySelector('.captcha-verify-container, [class*="captcha-verify"], [class*="captcha_verify"], #captcha_container');
+                isModalActive = el && el.offsetParent !== null;
+            }
+            return hasCaptchaText || isModalActive;
+        """)
+        if is_captcha:
+            print(f"\n  {w_tag}[!] PERHATIAN: Terdeteksi Captcha Verifikasi TikTok di Jendela Browser!")
+            print(f"  {w_tag}[!] Silakan geser potongan puzzle captcha di layar Chrome sekarang untuk melanjutkan...")
+            start_wait = time.time()
+            while time.time() - start_wait < timeout:
+                if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
+                    break
+                time.sleep(2)
+                still_captcha = driver.execute_script("""
+                    let text = document.body ? document.body.innerText : '';
+                    let hasText = text.includes('Drag the puzzle piece') || text.includes('Geser potongan puzzle') || text.includes('Select 2 objects');
+                    let el = document.querySelector('.captcha-verify-container, [class*="captcha-verify"]');
+                    return hasText || (el && el.offsetParent !== null);
+                """)
+                if not still_captcha:
+                    print(f"  {w_tag}[+] Captcha berhasil diselesaikan! Melanjutkan pengambilan komentar...")
+                    time.sleep(1.5)
+                    return True
+            print(f"  {w_tag}[!] Waktu tunggu captcha habis. Mencoba melanjutkan...")
+            return False
+    except Exception:
+        pass
+    return False
 
 # ==========================================
 # 4. FUNGSI CSV & OUTPUT PATHS (THREAD-SAFE)
@@ -935,6 +1026,8 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
     pause_ctrl.sleep(random.uniform(3.2, 4.2))
     ensure_page_loaded(driver, max_wait=6)
     dismiss_guest_popup(driver)
+    check_and_wait_for_captcha(driver, timeout=60, worker_prefix=worker_prefix)
+    dismiss_guest_popup(driver)
     
     # 1. Buka Panel Komentar secara Aman & Presisi (Jika belum terbuka)
     try:
@@ -1195,6 +1288,9 @@ def run_scraper():
     parser.add_argument("--min-year", type=int, default=2025, help="Tahun minimal video yang diambil (default: 2025)")
     parser.add_argument("--no-login", action="store_true", help="Gunakan Guest Mode (tanpa login)")
     args, unknown = parser.parse_known_args()
+
+    # Bersihkan sisa proses Chrome zombie & lock profil dari sesi sebelumnya
+    cleanup_zombie_chrome()
 
     mode = args.mode
     if not mode:

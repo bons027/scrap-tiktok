@@ -1,1 +1,15 @@
-cb nyeni
+# Masukkan kata kunci pencarian di bawah ini (1 kata kunci per baris)
+# - Pencarian Multi-Kata (contoh: bupati klaten): Semua kata wajib ada dalam postingan.
+# - Pencarian Frasa Persis (contoh: "bupati klaten"): Kata harus berurutan persis sama.
+# Baris yang diawali dengan '#' akan diabaikan
+Hamenang
+Jalan Rusak Klaten
+Bansos Klaten
+BLT Klaten
+Desil Klaten
+MBG Klaten
+BKK Klaten
+TPA Troketon
+Pupuk Langka Klaten
+PKH Klaten
+bps Klaten

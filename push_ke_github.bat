@@ -1,16 +1,17 @@
 @echo off
-title Push Update ke GitHub (bons027/scrap-tiktok)
+title Sinkronisasi Update ke GitHub Ori
 cd /d "%~dp0"
 
 echo ============================================================
-echo   PUSH UPDATE KE GITHUB (bons027/scrap-tiktok)
+echo   SINKRONISASI UPDATE KE GITHUB ORI (pratamaaja239-star)
+echo   Repositori: https://github.com/pratamaaja239-star/scrap-tiktok
 echo ============================================================
 echo.
 
-:: Cari lokasi Git dari GitHub Desktop
+:: Cari lokasi Git dari GitHub Desktop atau sistem PATH
 for /d %%i in ("%LocalAppData%\GitHubDesktop\app-*") do (
-    if exist "%%i\resources\app\git\cmd\git.exe" (
-        set "GIT_EXE=%%i\resources\app\git\cmd\git.exe"
+    if exist "%%~i\resources\app\git\cmd\git.exe" (
+        set "GIT_EXE=%%~i\resources\app\git\cmd\git.exe"
     )
 )
 
@@ -26,26 +27,21 @@ if not defined GIT_EXE (
 
 echo Menggunakan Git: %GIT_EXE%
 echo.
-echo Pilihan Push:
-echo   [1] Push ke branch 'feat/local-media-and-fb-fix' (Untuk Pull Request) - DIREKOMENDASIKAN
-echo   [2] Push langsung ke branch 'main'
-echo.
-set /p choice="Pilihan (1/2) [Default: 1]: "
-
-if "%choice%"=="2" (
-    echo.
-    echo [*] Melakukan push ke origin main...
-    "%GIT_EXE%" checkout main
-    "%GIT_EXE%" push -u origin main
-) else (
-    echo.
-    echo [*] Melakukan push ke origin feat/local-media-and-fb-fix...
-    "%GIT_EXE%" checkout feat/local-media-and-fb-fix
-    "%GIT_EXE%" push -u origin feat/local-media-and-fb-fix
-    echo.
-    echo [*] Jika push berhasil, Anda dapat membuat Pull Request di tautan:
-    echo     https://github.com/bons027/scrap-tiktok/pull/new/feat/local-media-and-fb-fix
-)
+echo [*] Memastikan branch lokal aktif...
+"%GIT_EXE%" checkout main
 
 echo.
+echo [*] Mengirim seluruh update ke GitHub Ori (pratamaaja239-star)...
+"%GIT_EXE%" push origin main
+"%GIT_EXE%" push origin feat/local-media-and-fb-fix
+
+echo.
+echo ============================================================
+echo   Selesai! Seluruh update sudah tersinkron ke GitHub Ori:
+echo   https://github.com/pratamaaja239-star/scrap-tiktok
+echo.
+echo   Catatan untuk akun bons027:
+echo   Buka https://github.com/bons027/scrap-tiktok
+echo   Lalu klik tombol "Sync fork" untuk update repository Anda.
+echo ============================================================
 pause

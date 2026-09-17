@@ -581,25 +581,118 @@ def get_output_csv_paths(base_output_name):
         comment_csv = os.path.join(daily_dir, f"{base_with_time}_comments.csv")
     return video_csv, comment_csv
 
-def load_keywords(filepath="keywords.txt"):
+def load_keywords(filepath="keywords.txt", prompt_fallback=True):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     full_path = os.path.join(base_dir, filepath) if not os.path.isabs(filepath) else filepath
     
     if not os.path.exists(full_path):
-        print(f"[!] File {filepath} tidak ditemukan. Membuat template default...")
-        with open(full_path, 'w', encoding='utf-8') as f:
-            f.write("# Masukkan 1 keyword per baris\nBupati Klaten\njalan rusak Klaten\n")
+        if prompt_fallback:
+            print(f"[!] File {filepath} tidak ditemukan. Membuat template default...")
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write("# Masukkan 1 keyword per baris\nBupati Klaten\njalan rusak Klaten\n")
+        else:
+            return []
             
     with open(full_path, 'r', encoding='utf-8') as f:
         keywords = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
         
-    if not keywords:
-        print("[!] File keywords kosong! Masukkan keyword langsung:")
+    if not keywords and prompt_fallback:
+        print(f"[!] File {filepath} kosong! Masukkan keyword langsung:")
         manual_kw = input("Keyword: ").strip()
         if manual_kw:
             keywords = [manual_kw]
             
     return keywords
+
+
+def select_keywords_source(base_dir=None, default_file="keywords.txt"):
+    """
+    Menampilkan menu interaktif pemilihan sumber kata kunci TikTok (file keywords*.txt,
+    file manual .txt lain, atau input kata kunci langsung).
+    Mengembalikan tuple (list kata kunci, label nama sumber).
+    """
+    if base_dir is None:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    candidate_files = sorted(set(glob.glob(os.path.join(base_dir, "keyword*.txt")) + glob.glob(os.path.join(base_dir, "keywords*.txt"))))
+    default_path = os.path.join(base_dir, default_file)
+    if not os.path.exists(default_path) and not candidate_files:
+        candidate_files = [default_path]
+    elif default_path in candidate_files:
+        candidate_files.remove(default_path)
+        candidate_files.insert(0, default_path)
+    elif os.path.exists(default_path):
+        candidate_files.insert(0, default_path)
+
+    file_options = []
+    for c_path in candidate_files:
+        f_name = os.path.basename(c_path)
+        try:
+            c_kws = load_keywords(c_path, prompt_fallback=False)
+            cnt = len(c_kws)
+        except Exception:
+            cnt = 0
+        file_options.append((f_name, c_path, cnt))
+
+    print("\n" + "-" * 55)
+    print("PILIHAN SUMBER KATA KUNCI (KEYWORDS):")
+    for i, (fn, fp, cnt) in enumerate(file_options, 1):
+        label = " [Default]" if i == 1 else ""
+        print(f"  {i}. {fn} ({cnt} kata kunci aktif){label}")
+    print("  M. Masukkan nama file .txt lain secara manual")
+    print("  T. Input kata kunci langsung (pisahkan koma jika > 1)")
+    print("-" * 55)
+
+    choice = input(f"Pilih sumber kata kunci [1-{len(file_options)}/M/T] (default: 1): ").strip()
+    keywords = []
+    source_label = "keywords"
+
+    if not choice or choice == "1":
+        chosen_path = file_options[0][1] if file_options else default_path
+        keywords = load_keywords(chosen_path, prompt_fallback=False)
+        source_label = os.path.splitext(os.path.basename(chosen_path))[0]
+        print(f"[*] Menggunakan file: '{os.path.basename(chosen_path)}' ({len(keywords)} kata kunci)")
+    elif choice.isdigit() and 1 <= int(choice) <= len(file_options):
+        chosen_path = file_options[int(choice) - 1][1]
+        keywords = load_keywords(chosen_path, prompt_fallback=False)
+        source_label = os.path.splitext(os.path.basename(chosen_path))[0]
+        print(f"[*] Menggunakan file: '{os.path.basename(chosen_path)}' ({len(keywords)} kata kunci)")
+    elif choice.upper() == "M":
+        custom_file = input("Masukkan nama file .txt (contoh: keyword2.txt): ").strip()
+        if custom_file and not custom_file.endswith(".txt"):
+            custom_file += ".txt"
+        chosen_path = os.path.join(base_dir, custom_file) if not os.path.isabs(custom_file) else custom_file
+        if not os.path.exists(chosen_path):
+            print(f"[!] File '{custom_file}' tidak ditemukan di folder script. Menggunakan default.")
+            chosen_path = default_path
+        keywords = load_keywords(chosen_path, prompt_fallback=False)
+        source_label = os.path.splitext(os.path.basename(chosen_path))[0]
+        print(f"[*] Menggunakan file: '{os.path.basename(chosen_path)}' ({len(keywords)} kata kunci)")
+    elif choice.upper() == "T":
+        manual_kw = input("Masukkan kata kunci (pisahkan koma jika > 1): ").strip()
+        if manual_kw:
+            if "," in manual_kw:
+                keywords = [k.strip() for k in manual_kw.split(",") if k.strip()]
+            else:
+                keywords = [manual_kw]
+            clean_tag = re.sub(r'[^\w]+', '_', keywords[0]).strip('_').lower()[:20]
+            source_label = clean_tag or "manual"
+            print(f"[*] Menggunakan {len(keywords)} kata kunci manual: {', '.join(keywords)}")
+    else:
+        chosen_path = file_options[0][1] if file_options else default_path
+        keywords = load_keywords(chosen_path, prompt_fallback=False)
+        source_label = os.path.splitext(os.path.basename(chosen_path))[0]
+        print(f"[*] Pilihan tidak dikenal, menggunakan default: '{os.path.basename(chosen_path)}' ({len(keywords)} kata kunci)")
+
+    if not keywords:
+        print("[!] File/input kata kunci kosong! Masukkan kata kunci langsung:")
+        manual_kw = input("Keyword: ").strip()
+        if manual_kw:
+            keywords = [manual_kw]
+            clean_tag = re.sub(r'[^\w]+', '_', manual_kw).strip('_').lower()[:20]
+            source_label = clean_tag or "manual"
+
+    return keywords, source_label
 
 def extract_hashtags(text):
     if not text:
@@ -1064,6 +1157,7 @@ def run_scraper():
     parser.add_argument("--workers", type=int, help="Jumlah browser paralel (1-4)")
     parser.add_argument("--output", type=str, help="Nama dasar file output CSV")
     parser.add_argument("--keyword", type=str, help="Kata kunci tunggal pencarian")
+    parser.add_argument("--keywords-file", type=str, help="Path file kata kunci .txt (contoh: keyword2.txt)")
     parser.add_argument("--max-comments", type=int, help="Maksimal komentar per video")
     parser.add_argument("--max-videos", type=int, help="Maksimal video yang diproses")
     parser.add_argument("--min-year", type=int, default=2025, help="Tahun minimal video yang diambil (default: 2025)")
@@ -1077,7 +1171,7 @@ def run_scraper():
         print("=" * 65)
         print("PILIHAN MENU:")
         print("  0. Setup & Simpan Sesi Login TikTok (Cukup Login 1 Kali)")
-        print("  1. Scrap Video Metadata Saja (Berdasarkan keywords.txt)")
+        print("  1. Scrap Video Metadata Saja (Pilih File Keyword / Input Manual)")
         print("  2. Scrap Video + Komentar Sekaligus (Multi-Browser Cepat & Otomatis)")
         print("  3. Scrap Komentar dari File CSV Video yang Sudah Ada")
         print("=" * 65)
@@ -1097,17 +1191,25 @@ def run_scraper():
     min_post_year = args.min_year or 2025
 
     if mode in ["1", "2"]:
+        source_label = "tiktok"
         if args.keyword:
             keywords = [args.keyword]
+            source_label = re.sub(r'[^\w]+', '_', args.keyword).strip('_').lower()[:20]
+        elif getattr(args, 'keywords_file', None):
+            keywords = load_keywords(args.keywords_file, prompt_fallback=False)
+            source_label = os.path.splitext(os.path.basename(args.keywords_file))[0]
+            print(f"[*] Menggunakan file kata kunci: '{args.keywords_file}' ({len(keywords)} kata kunci)")
         else:
-            keywords = load_keywords("keywords.txt")
+            keywords, source_label = select_keywords_source()
+
         if not keywords:
             print("[ERROR] Tidak ada keyword untuk diproses.")
             return
         print(f"\n[*] Berhasil memuat {len(keywords)} keyword: {', '.join(keywords)}")
 
+        default_out = f"tiktok_{source_label}" if source_label else "tiktok_isu_daerah"
         if not base_output_name:
-            base_output_name = input("Masukkan nama file output (default: tiktok_isu_daerah): ").strip() or "tiktok_isu_daerah"
+            base_output_name = input(f"Masukkan nama file output (default: {default_out}): ").strip() or default_out
 
         video_csv, comment_csv = get_output_csv_paths(base_output_name)
         init_csv(video_csv)

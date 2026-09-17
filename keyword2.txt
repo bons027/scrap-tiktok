@@ -3,10 +3,15 @@
 # - Pencarian Frasa Persis (contoh: "bupati klaten"): Kata harus berurutan persis sama.
 # Baris yang diawali dengan '#' akan diabaikan
 Hamenang
-BKK
-Jalan Rusak
-Desil
-mbg klaten
-PKH 
-TPA Troketon
-bps klaten
+BKK Klaten
+Kasus BKK Klaten
+Galian C Klaten
+Tol Jogja Solo Klaten
+Tolak Tambang Klaten
+Jalan Rusak Klaten
+Demo Klaten
+Unjuk rasa Klaten
+MBG Klaten
+Makan Bergizi Gratis Klaten
+PKH Klaten
+BLT DBHCHT Klaten

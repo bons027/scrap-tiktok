@@ -1,13 +1,15 @@
 @echo off
-title Push Update ke GitHub (bons027/scrap-tiktok)
+title Sinkronisasi Update ke GitHub (bons027 & pratamaaja239-star)
 cd /d "%~dp0"
 
 echo ============================================================
-echo   PUSH UPDATE KE GITHUB (bons027/scrap-tiktok)
+echo   SINKRONISASI UPDATE KE GITHUB
+echo   - GitHub Ori  : https://github.com/pratamaaja239-star/scrap-tiktok
+echo   - GitHub Fork : https://github.com/bons027/scrap-tiktok
 echo ============================================================
 echo.
 
-:: Cari lokasi Git dari GitHub Desktop
+:: Cari lokasi Git dari GitHub Desktop atau sistem PATH
 for /d %%i in ("%LocalAppData%\GitHubDesktop\app-*") do (
     if exist "%%i\resources\app\git\cmd\git.exe" (
         set "GIT_EXE=%%i\resources\app\git\cmd\git.exe"
@@ -26,26 +28,49 @@ if not defined GIT_EXE (
 
 echo Menggunakan Git: %GIT_EXE%
 echo.
-echo Pilihan Push:
-echo   [1] Push ke branch 'feat/local-media-and-fb-fix' (Untuk Pull Request) - DIREKOMENDASIKAN
-echo   [2] Push langsung ke branch 'main'
+echo Pilihan Target Sinkronisasi:
+echo   [1] Singkronkan ke KEDUANYA (GitHub Ori + GitHub bons027) [DIREKOMENDASIKAN]
+echo   [2] Singkronkan HANYA ke GitHub Ori (pratamaaja239-star)
+echo   [3] Singkronkan HANYA ke GitHub bons027
 echo.
-set /p choice="Pilihan (1/2) [Default: 1]: "
+set /p choice="Pilihan (1/2/3) [Default: 1]: "
+
+if "%choice%"=="" set "choice=1"
+
+echo.
+echo [*] Memastikan branch lokal aktif...
+"%GIT_EXE%" checkout main
+
+if "%choice%"=="1" (
+    echo.
+    echo [*] 1/2 Mengirim update ke GitHub Ori (pratamaaja239-star)...
+    "%GIT_EXE%" push origin main
+    "%GIT_EXE%" push origin feat/local-media-and-fb-fix
+
+    echo.
+    echo [*] 2/2 Mengirim update ke GitHub bons027...
+    "%GIT_EXE%" push upstream main
+    "%GIT_EXE%" push upstream feat/local-media-and-fb-fix
+)
 
 if "%choice%"=="2" (
     echo.
-    echo [*] Melakukan push ke origin main...
-    "%GIT_EXE%" checkout main
-    "%GIT_EXE%" push -u origin main
-) else (
+    echo [*] Mengirim update ke GitHub Ori (pratamaaja239-star)...
+    "%GIT_EXE%" push origin main
+    "%GIT_EXE%" push origin feat/local-media-and-fb-fix
+)
+
+if "%choice%"=="3" (
     echo.
-    echo [*] Melakukan push ke origin feat/local-media-and-fb-fix...
-    "%GIT_EXE%" checkout feat/local-media-and-fb-fix
-    "%GIT_EXE%" push -u origin feat/local-media-and-fb-fix
-    echo.
-    echo [*] Jika push berhasil, Anda dapat membuat Pull Request di tautan:
-    echo     https://github.com/bons027/scrap-tiktok/pull/new/feat/local-media-and-fb-fix
+    echo [*] Mengirim update ke GitHub bons027...
+    "%GIT_EXE%" push upstream main
+    "%GIT_EXE%" push upstream feat/local-media-and-fb-fix
 )
 
 echo.
+echo ============================================================
+echo   Sinkronisasi selesai!
+echo   - Cek GitHub Ori : https://github.com/pratamaaja239-star/scrap-tiktok
+echo   - Cek GitHub Fork: https://github.com/bons027/scrap-tiktok
+echo ============================================================
 pause

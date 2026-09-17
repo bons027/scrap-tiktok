@@ -45,7 +45,11 @@ NOTIFICATION_BLACKLIST = [
     'jawab kuis'
 ]
 
-# Parameter URL Facebook untuk Filter 'Postingan Terbaru' (Chronological Recent Sort)
+# Filter BARU untuk "Postingan Terbaru" (recent_posts) - endpoint /search/top/
+# JSON Asli: {"recent_posts:0":"{\"name\":\"recent_posts\",\"args\":\"\"}"}
+FB_RECENT_POSTS_FILTER = "eyJyZWNlbnRfcG9zdHM6MCI6IntcIm5hbWVcIjpcInJlY2VudF9wb3N0c1wiLFwiYXJnc1wiOlwiXCJ9In0%3D"
+
+# Filter LAMA (chronosort) - tetap disimpan sebagai fallback
 # JSON Asli: {"rp_chrono_sort:0":"{\"name\":\"chronosort\",\"args\":\"\"}"}
 FB_CHRONOSORT_FILTER = "eyJycF9jaHJvbm9fc29ydDowIjoie1wibmFtZVwiOlwiY2hyb25vc29ydFwiLFwiYXJnc1wiOlwiXCJ9In0%3D"
 
@@ -1358,6 +1362,131 @@ def perform_feed_scroll(driver, distance=800):
     except Exception:
         pass
     time.sleep(0.05)
+
+
+# ==========================================
+# HELPER KHUSUS SEARCH MODE (MODE 1)
+# Tidak dipakai oleh Mode 2 (Group Scraping)
+# ==========================================
+
+DEBUG_SEARCH = False
+
+
+def build_search_url(keyword, use_filter=True, filter_version="recent"):
+    """
+    Membangun URL pencarian Facebook global (Mode 1).
+    - filter_version="recent"  -> Filter BARU (recent_posts) + endpoint /search/top/
+    - filter_version="chrono"  -> Filter LAMA (chronosort) + endpoint /search/posts/
+    - filter_version="none"    -> Tanpa filter (fallback terakhir)
+    
+    Fungsi ini HANYA dipanggil oleh Mode 1.
+    """
+    q = urllib.parse.quote(keyword)
+    
+    if not use_filter:
+        return f"https://www.facebook.com/search/top/?q={q}"
+    
+    if filter_version == "recent":
+        return f"https://www.facebook.com/search/top/?q={q}&filters={FB_RECENT_POSTS_FILTER}"
+    elif filter_version == "chrono":
+        return f"https://www.facebook.com/search/posts/?q={q}&filters={FB_CHRONOSORT_FILTER}"
+    else:
+        return f"https://www.facebook.com/search/top/?q={q}"
+
+
+def perform_search_feed_scroll(driver, distance=800):
+    """
+    Scroll khusus halaman /search/top/ Facebook.
+    Mencari container scrollable TERBESAR (bukan sidebar filter).
+    """
+    try:
+        ActionChains(driver).scroll_by_amount(0, int(distance)).perform()
+    except Exception:
+        pass
+    try:
+        driver.execute_script("""
+            const dist = arguments[0];
+            window.scrollBy(0, dist);
+
+            // Cari container scrollable terbesar (menghindari sidebar kecil)
+            let allDivs = document.querySelectorAll('div');
+            let biggest = null, biggestArea = 0;
+            for (let d of allDivs) {
+                const s = window.getComputedStyle(d);
+                if ((s.overflowY === 'auto' || s.overflowY === 'scroll')
+                    && d.scrollHeight > d.clientHeight + 50) {
+                    let area = d.clientHeight * d.clientWidth;
+                    if (area > biggestArea) {
+                        biggestArea = area;
+                        biggest = d;
+                    }
+                }
+            }
+            if (biggest) {
+                biggest.scrollTop += dist;
+                biggest.dispatchEvent(new WheelEvent('wheel', {
+                    deltaY: dist, bubbles: true
+                }));
+            }
+        """, distance)
+    except Exception:
+        pass
+    time.sleep(0.05)
+
+
+def close_search_dialog(driver, search_url=None):
+    """
+    Tutup dialog di halaman search TANPA reload agresif.
+    Hanya reload jika URL benar-benar keluar dari /search/.
+    """
+    # 1. Tutup dialog komentar jika ada
+    try:
+        driver.execute_script("""
+            let dialogs = document.querySelectorAll(
+                'div[role="dialog"][aria-modal="true"], div[data-pagelet*="Tahoe"]'
+            );
+            for (let d of dialogs) {
+                let closeBtn = d.querySelector(
+                    'div[aria-label="Tutup"], div[aria-label="Close"], '
+                    + 'div[role="button"][aria-label*="Tutup"]'
+                );
+                if (closeBtn) {
+                    (closeBtn.closest('div[role="button"]') || closeBtn).click();
+                }
+            }
+        """)
+        time.sleep(0.2)
+    except Exception:
+        pass
+
+    # 2. Tekan ESC jika masih ada dialog
+    try:
+        has_dialog = driver.execute_script("""
+            let dialogs = document.querySelectorAll(
+                'div[role="dialog"][aria-modal="true"], div[data-pagelet*="Tahoe"]'
+            );
+            for (let d of dialogs) {
+                if (d.querySelector('[aria-label*="Komentar"], [aria-label*="Comment"]')) {
+                    return true;
+                }
+            }
+            return false;
+        """)
+        if has_dialog:
+            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+            time.sleep(0.2)
+    except Exception:
+        pass
+
+    # 3. Hanya reload jika URL keluar dari /search/
+    if search_url:
+        try:
+            curr = driver.current_url.lower()
+            if '/search/' not in curr:
+                driver.get(search_url)
+                time.sleep(2.0)
+        except Exception:
+            pass
 
 
 def scroll_comment_container_center(driver, distance=550):
@@ -3135,7 +3264,7 @@ def process_global_search_workflow(driver, keyword, post_csv, comment_csv, max_p
     print(f"\n[*] Selesai memproses kata kunci '{keyword}'. Total {total_posts_saved} postingan & {total_comments_saved} baris komentar dicatat.")
 
 
-def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20, max_comments_per_post=150, custom_search_url=None, group_name=None, min_year=2025):
+def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20, max_comments_per_post=150, custom_search_url=None, group_name=None, min_year=2025, is_search_mode=False):
     """
     Workflow 4 Langkah Berurutan (Post per Post) dengan Kecepatan Tinggi & Deduplikasi Sheet Otomatis:
     1. Buka Keyword di Facebook Search Feed / Group Search.
@@ -3150,7 +3279,15 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
     total_posts_saved = 0
     total_comments_saved = 0
     empty_scrolls = 0
-    search_url = custom_search_url or f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(keyword)}&filters={FB_CHRONOSORT_FILTER}"
+    filter_fallback_done = False
+    filter_version_used = "recent" if is_search_mode else "chrono"
+
+    if custom_search_url:
+        search_url = custom_search_url
+    elif is_search_mode:
+        search_url = build_search_url(keyword, use_filter=True, filter_version="recent")
+    else:
+        search_url = f"https://www.facebook.com/search/posts/?q={urllib.parse.quote(keyword)}&filters={FB_CHRONOSORT_FILTER}"
 
     title_info = f"Grup '{group_name}' | Kata Kunci: '{keyword}'" if group_name else f"Kata Kunci: '{keyword}'"
     max_label = f"{max_posts} Postingan" if max_posts > 0 else "Tanpa Batas (Ambil Semua)"
@@ -3181,13 +3318,32 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
             break
 
         # Pastikan modal dialog tertutup dan tetap di halaman pencarian
-        close_post_dialog(driver, search_url=search_url)
+        if is_search_mode:
+            close_search_dialog(driver, search_url=search_url)
+        else:
+            close_post_dialog(driver, search_url=search_url)
+
+        if is_search_mode and DEBUG_SEARCH:
+            try:
+                info = driver.execute_script("""
+                    return {
+                        url: location.href,
+                        feed: document.querySelectorAll('div[role="feed"] > div').length,
+                        article: document.querySelectorAll('div[role="article"]').length,
+                        bodyH: document.body.scrollHeight,
+                        scrollY: window.scrollY
+                    };
+                """)
+                print(f"  [DEBUG-SEARCH] {info}")
+            except Exception:
+                pass
 
         # Cari postingan berikutnya yang belum diproses dari feed
         next_post = driver.execute_script("""
             let seenSignatures = arguments[0];
             let seenPostIds = arguments[1];
             let seenPostUrls = arguments[2];
+            let isSearchMode = arguments[4] === true;
 
             function decodeUzpf(tokenStr) {
                 if (!tokenStr) return '';
@@ -3208,9 +3364,17 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
 
             // Dapatkan HANYA kartu postingan terluar (outermost post cards)
             function getPostCards() {
-                let candidates = document.querySelectorAll('div[role="feed"] > div, div[role="article"]');
-                if (candidates.length === 0) {
-                    candidates = document.querySelectorAll('div[data-ad-preview="message"], div[class*="x1yztbdb"]');
+                let candidates = [];
+                if (isSearchMode) {
+                    candidates = Array.from(document.querySelectorAll('div[role="feed"] > div, div[role="article"], div[data-pagelet*="Search"] > div, div[data-pagelet*="FeedUnit"]'));
+                    if (candidates.length === 0) {
+                        candidates = Array.from(document.querySelectorAll('div[role="main"] div[role="article"], div[data-ad-preview="message"], div[class*="x1yztbdb"]'));
+                    }
+                } else {
+                    candidates = Array.from(document.querySelectorAll('div[role="feed"] > div, div[role="article"]'));
+                    if (candidates.length === 0) {
+                        candidates = Array.from(document.querySelectorAll('div[data-ad-preview="message"], div[class*="x1yztbdb"]'));
+                    }
                 }
                 let postCards = [];
                 for (let c of candidates) {
@@ -3444,7 +3608,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
 
                 // 1. Periksa apakah halaman aktif berada di dalam grup
                 let currHref = window.location.href || '';
-                let pageGrpM = currHref.match(/facebook\.com\/groups\/([^/?#]+)/);
+                let pageGrpM = currHref.match(/facebook\\.com\\/groups\\/([^/?#]+)/);
                 if (pageGrpM && !['search', 'feed', 'joins', 'create', 'discover'].includes(pageGrpM[1].toLowerCase())) {
                     groupId = pageGrpM[1];
                 }
@@ -3455,20 +3619,20 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                     if (url.includes('/search/') || url.includes('/hashtag/') || url.includes('/notifications')) return null;
 
                     // 1. Facebook Watch
-                    let mWatch = url.match(/[?&]v=([0-9]{6,25})/i) || url.match(/\/watch\/?\?v=([0-9]{6,25})/i);
+                    let mWatch = url.match(/[?&]v=([0-9]{6,25})/i) || url.match(/\\/watch\\/?\\?v=([0-9]{6,25})/i);
                     if (mWatch) {
                         return { type: 'video', id: mWatch[1], canonicalUrl: `https://www.facebook.com/watch/?v=${mWatch[1]}` };
                     }
 
                     // 2. Facebook Reel (/reel/ atau /reels/)
-                    let mReel = url.match(/\/(?:reel|reels)\/([0-9]{6,25})/i);
+                    let mReel = url.match(/\\/(?:reel|reels)\\/([0-9]{6,25})/i);
                     if (mReel) {
                         return { type: 'reel', id: mReel[1], canonicalUrl: `https://www.facebook.com/reel/${mReel[1]}/` };
                     }
 
                     // 3. Photo Links (/photo/, photo.php, /photos/)
                     if (url.includes('/photo') || url.includes('photo.php')) {
-                        let mSet = url.match(/set=(?:gm|pcb)\.([0-9]{6,25})/i);
+                        let mSet = url.match(/set=(?:gm|pcb)\\.([0-9]{6,25})/i);
                         if (mSet) {
                             let postId = mSet[1];
                             let gId = currentGroupId;
@@ -3482,34 +3646,34 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                         let mFbid = url.match(/[?&]fbid=([0-9]{6,25})/i);
                         if (mFbid) {
                             let fbid = mFbid[1];
-                            let mSetA = url.match(/[?&]set=(a\.[0-9.]+)/i);
+                            let mSetA = url.match(/[?&]set=(a\\.[0-9.]+)/i);
                             let photoUrl = mSetA ? `https://www.facebook.com/photo/?fbid=${fbid}&set=${mSetA[1]}` : `https://www.facebook.com/photo/?fbid=${fbid}`;
                             return { type: 'photo', id: fbid, canonicalUrl: photoUrl };
                         }
                     }
 
                     // 4. Video dalam Grup (/groups/{groupId}/videos/{videoId})
-                    let mGrpVid = url.match(/\/groups\/([^/?#]+)\/videos\/([0-9]{6,25})/i);
+                    let mGrpVid = url.match(/\\/groups\\/([^/?#]+)\\/videos\\/([0-9]{6,25})/i);
                     if (mGrpVid) {
                         let vId = mGrpVid[2];
                         return { type: 'video', id: vId, canonicalUrl: `https://www.facebook.com/watch/?v=${vId}` };
                     }
 
                     // 5. Video Halaman/User (/author/videos/{videoId})
-                    let mUsrVid = url.match(/facebook\.com\/([^/?#]+)\/videos\/([0-9]{6,25})/i);
+                    let mUsrVid = url.match(/facebook\\.com\\/([^/?#]+)\\/videos\\/([0-9]{6,25})/i);
                     if (mUsrVid && !['groups', 'watch', 'permalink.php'].includes(mUsrVid[1].toLowerCase())) {
                         return { type: 'video', id: mUsrVid[2], author: mUsrVid[1], canonicalUrl: `https://www.facebook.com/watch/?v=${mUsrVid[2]}` };
                     }
 
                     // 6. Share link (/share/v/, /share/r/, /share/p/)
-                    let mShare = url.match(/\/share\/(v|r|p)\/([a-zA-Z0-9_-]+)/i);
+                    let mShare = url.match(/\\/share\\/(v|r|p)\\/([a-zA-Z0-9_-]+)/i);
                     if (mShare) {
                         let sType = mShare[1] === 'v' ? 'video' : (mShare[1] === 'r' ? 'reel' : 'post');
                         return { type: sType, id: mShare[2], canonicalUrl: url.split('?')[0] };
                     }
 
                     // 7. Postingan Grup dengan set=gm. atau set=pcb.
-                    let mSetAny = url.match(/set=(?:gm|pcb)\.([0-9]{6,25})/i);
+                    let mSetAny = url.match(/set=(?:gm|pcb)\\.([0-9]{6,25})/i);
                     if (mSetAny) {
                         let pId = mSetAny[1];
                         if (currentGroupId && pId !== currentGroupId) {
@@ -3519,7 +3683,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                     }
 
                     // 8. Postingan Grup (/groups/{groupId}/posts/{postId} atau permalink/{postId})
-                    let mGrpPost = url.match(/\/groups\/([^/?#]+)\/(?:user\/[^/?#]+\/)?(?:posts|permalink)\/([0-9]{6,25})/i);
+                    let mGrpPost = url.match(/\\/groups\\/([^/?#]+)\\/(?:user\\/[^/?#]+\\/)?(?:posts|permalink)\\/([0-9]{6,25})/i);
                     if (mGrpPost) {
                         let gId = mGrpPost[1];
                         let pId = mGrpPost[2];
@@ -3547,7 +3711,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                     }
 
                     // 10. User / Page Post (/author/posts/{postId})
-                    let mUsrPost = url.match(/facebook\.com\/([^/?#]+)\/posts\/([0-9]{6,25})/i);
+                    let mUsrPost = url.match(/facebook\\.com\\/([^/?#]+)\\/posts\\/([0-9]{6,25})/i);
                     if (mUsrPost && !['groups', 'permalink.php', 'story.php'].includes(mUsrPost[1].toLowerCase())) {
                         return { type: 'post', id: mUsrPost[2], author: mUsrPost[1], canonicalUrl: `https://www.facebook.com/${mUsrPost[1]}/posts/${mUsrPost[2]}` };
                     }
@@ -3566,7 +3730,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                         if (mRd && mRd[1] && !rdid) rdid = mRd[1];
                     }
 
-                    let grpM = href.match(/facebook\.com\/groups\/([^/?#]+)/) || href.match(/\/groups\/([^/?#]+)/);
+                    let grpM = href.match(/facebook\\.com\\/groups\\/([^/?#]+)/) || href.match(/\\/groups\\/([^/?#]+)/);
                     if (grpM && !['search', 'feed', 'joins', 'create', 'discover'].includes(grpM[1].toLowerCase())) {
                         if (!groupId) groupId = grpM[1];
                     }
@@ -3609,7 +3773,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                 // Fallback 3: Scan innerHTML kartu postingan untuk mencari ID video / postingan
                 if (!postId) {
                     let inner = p.innerHTML || '';
-                    let mInner = inner.match(/(?:video_id[":\[=]+|data-video-id="|multi_permalinks[":\[=]+|story_fbid[":\[=]+|post_id[":\[=]+|top_level_post_id[":\[=]+)([0-9]{8,25})/i);
+                    let mInner = inner.match(/(?:video_id[":\\[=]+|data-video-id="|multi_permalinks[":\\[=]+|story_fbid[":\\[=]+|post_id[":\\[=]+|top_level_post_id[":\\[=]+)([0-9]{8,25})/i);
                     if (mInner && mInner[1] && mInner[1] !== groupId) {
                         postId = mInner[1];
                         let isInnerVid = inner.includes('video_id') || inner.includes('data-video-id') || isVideoPost;
@@ -3635,7 +3799,7 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                     postUrl = `https://www.facebook.com/groups/${groupId}`;
                 }
 
-                let cleanUrl = postUrl ? postUrl.split('?')[0].replace(/\/$/, '') : '';
+                let cleanUrl = postUrl ? postUrl.split('?')[0].replace(/\\/$/, '') : '';
 
                 // DEDUPLIKASI: Lewati jika postingan ini sudah pernah diproses
                 let isSpecificPostUrl = cleanUrl && !cleanUrl.includes('/search/') && (
@@ -3651,9 +3815,9 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
 
                 // EKSTRAKSI TANGGAL POSTINGAN SECARA PRESISI DARI ELEMEN TIMESTAMP KHUSUS
                 let postDate = '';
-                const monthRegex = /\b(?:januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember|january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|agt|agu|aug|sep|okt|oct|nov|des|dec)\b/i;
-                const yearRegex = /\b(19\d{2}|20\d{2})\b/;
-                const relTimeRegex = /\b\d+\s*(?:thn|th|tahun|yr|yrs|year|years|mgg|minggu|wk|week|weeks|hr|hari|day|days|jam|jm|hour|hours|mnt|menit|min|mins|lalu|ago)\b/i;
+                const monthRegex = /\\b(?:januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember|january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|agt|agu|aug|sep|okt|oct|nov|des|dec)\\b/i;
+                const yearRegex = /\\b(19\\d{2}|20\\d{2})\\b/;
+                const relTimeRegex = /\\b\\d+\\s*(?:thn|th|tahun|yr|yrs|year|years|mgg|minggu|wk|week|weeks|hr|hari|day|days|jam|jm|hour|hours|mnt|menit|min|mins|lalu|ago)\\b/i;
 
                 let timeCandidates = [];
 
@@ -3874,12 +4038,40 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
             }
 
             return null;
-        """, list(seen_signatures), list(seen_post_ids), list(seen_post_urls), group_name or '')
+        """, list(seen_signatures), list(seen_post_ids), list(seen_post_urls), group_name or '', is_search_mode)
 
         # Jika belum ada postingan baru di layar, scroll feed pencarian ke bawah
         if not next_post:
             empty_scrolls += 1
-            perform_feed_scroll(driver, distance=750)
+
+            # Fallback pertama: recent_posts -> chronosort
+            if is_search_mode and not filter_fallback_done and total_posts_saved == 0 and empty_scrolls >= 3:
+                print("\n[!] Filter 'recent_posts' tidak menghasilkan postingan.")
+                print("[*] Mencoba fallback ke filter lama (chronosort)...")
+                filter_version_used = "chrono"
+                search_url = build_search_url(keyword, use_filter=True, filter_version="chrono")
+                driver.get(search_url)
+                pause_ctrl.sleep(3.5)
+                filter_fallback_done = True
+                empty_scrolls = 0
+                continue
+
+            # Fallback kedua: chronosort -> tanpa filter sama sekali (klik manual)
+            if is_search_mode and filter_fallback_done and total_posts_saved == 0 and empty_scrolls >= 3:
+                if filter_version_used == "chrono":
+                    print("\n[!] Filter 'chronosort' juga gagal. Mencoba TANPA filter...")
+                    search_url = build_search_url(keyword, use_filter=False)
+                    driver.get(search_url)
+                    pause_ctrl.sleep(3.5)
+                    apply_recent_posts_filter(driver)  # klik manual tombol "Terbaru"
+                    filter_version_used = "none"
+                    empty_scrolls = 0
+                    continue
+
+            if is_search_mode:
+                perform_search_feed_scroll(driver, distance=750)
+            else:
+                perform_feed_scroll(driver, distance=750)
             pause_ctrl.sleep(random.uniform(1.2, 1.8))
             continue
 
@@ -4161,7 +4353,10 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
         # VERIFIKASI TANGGAL KETAT (LANGKAH 2): Lewati jika postingan terbukti usang dari tanggal dialog
         if is_outdated_post(p_date, min_year=min_year):
             print(f"  [DILEWATI] Postingan Usang ({p_date}) @{p_author}: \"{p_text[:40]}...\" (Filter aktif: Hanya tahun {min_year}+)")
-            close_post_dialog(driver, search_url=search_url)
+            if is_search_mode:
+                close_search_dialog(driver, search_url=search_url)
+            else:
+                close_post_dialog(driver, search_url=search_url)
             continue
 
         # JIKA TANGGAL MASIH 'Terkini', PERIKSA HASHTAG SEBAGAI PENGAMAN TAMBAHAN
@@ -4173,7 +4368,10 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
                     t_years = [int(y) for y in re.findall(r'\b(19\d{2}|20\d{2})\b', t_clean) if 1990 <= int(y) <= 2099]
                     if t_years and all(y < min_year for y in t_years):
                         print(f"  [DILEWATI] Postingan Usang dari Hashtag '{t_clean}' @{p_author}: \"{p_text[:40]}...\" (Filter aktif: Hanya tahun {min_year}+)")
-                        close_post_dialog(driver, search_url=search_url)
+                        if is_search_mode:
+                            close_search_dialog(driver, search_url=search_url)
+                        else:
+                            close_post_dialog(driver, search_url=search_url)
                         continue
 
         # Pastikan URL Postingan selalu berupa link postingan langsung (bukan generic search URL atau grup root)
@@ -4260,10 +4458,16 @@ def process_search_workflow(driver, keyword, post_csv, comment_csv, max_posts=20
             print(f"  [+] Selesai Post #{total_posts_saved}. Link postingan ({p_url}) berhasil dicatat ke file komentar & postingan!")
 
         # Tutup dialog postingan dan pastikan kembali ke feed pencarian
-        close_post_dialog(driver, search_url=search_url)
+        if is_search_mode:
+            close_search_dialog(driver, search_url=search_url)
+        else:
+            close_post_dialog(driver, search_url=search_url)
         pause_ctrl.sleep(0.4)
         # Scroll feed pencarian ke bawah untuk memicu postingan berikutnya
-        perform_feed_scroll(driver, distance=450)
+        if is_search_mode:
+            perform_search_feed_scroll(driver, distance=450)
+        else:
+            perform_feed_scroll(driver, distance=450)
         pause_ctrl.sleep(0.4)
 
     print(f"\n[*] Selesai pencarian '{keyword}'. Total {total_posts_saved} post & {total_comments_saved} komentar tersimpan di '{comment_csv}'.")

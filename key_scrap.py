@@ -932,33 +932,47 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
     w_tag = f"[{worker_prefix}] " if worker_prefix else ""
     print(f"\n  {w_tag}Mengakses Video ID {video_id}: {video_url}")
     driver.get(video_url)
-    pause_ctrl.sleep(2.5)
+    pause_ctrl.sleep(random.uniform(3.2, 4.2))
     ensure_page_loaded(driver, max_wait=6)
     dismiss_guest_popup(driver)
     
-    # Pastikan tab komentar aktif
+    # 1. Buka Panel Komentar secara Aman & Presisi (Jika belum terbuka)
     try:
         driver.execute_script("""
-            let els = document.querySelectorAll('[role="tab"], button, [data-e2e*="comment"], [data-e2e*="tab"]');
-            els.forEach(el => {
-                let txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                let aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                let e2e = (el.getAttribute('data-e2e') || '').toLowerCase();
-                if (txt.includes('comment') || txt.includes('komentar') || e2e.includes('comment') || aria.includes('comment')) {
-                    try { el.click(); } catch(e) {}
-                }
-            });
+            let commentsVisible = document.querySelectorAll('[data-e2e="comment-level-1"], [class*="DivCommentItemContainer"]').length > 0;
+            let list = document.querySelector('[data-e2e="comment-list"], [class*="DivCommentListContainer"], [class*="DivCommentMain"]');
+            let isContainerOpen = list && list.offsetParent !== null && list.clientHeight > 100;
+            
+            if (commentsVisible || isContainerOpen) {
+                return;
+            }
+            
+            // Cari tombol komentar tunggal (utamakan data-e2e="comment-icon" atau "browse-comment-icon")
+            let btn = document.querySelector('[data-e2e="comment-icon"], [data-e2e="browse-comment-icon"]');
+            if (!btn) {
+                btn = Array.from(document.querySelectorAll('button, div[role="button"], div[class*="Button"]')).find(b => {
+                    let e2e = b.getAttribute('data-e2e') || '';
+                    let aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                    let txt = (b.innerText || '').trim().toLowerCase();
+                    return e2e.includes('comment') || aria.includes('read or add comments') || aria.includes('komentar') || txt === 'comments';
+                });
+            }
+            if (btn) {
+                btn.click();
+            }
         """)
     except Exception:
         pass
-    pause_ctrl.sleep(1.8)
+    pause_ctrl.sleep(random.uniform(1.8, 2.5))
+    dismiss_guest_popup(driver)
     
     seen_comment_ids = set()
+    seen_text_signatures = set()
     total_captured = 0
     empty_scrolls = 0
     api_finished = False
     
-    max_scrolls = 200 if max_comments == 0 else max(5, (max_comments // 15) + 5)
+    max_scrolls = 200 if max_comments == 0 else max(8, (max_comments // 15) + 6)
     
     for scroll_idx in range(max_scrolls):
         if not pause_ctrl.check_pause() or pause_ctrl.is_stopped():
@@ -984,14 +998,17 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
                         for c in raw_comments:
                             if not isinstance(c, dict): continue
                             cid = str(c.get('cid', ''))
-                            if not cid or cid in seen_comment_ids:
-                                continue
-                            seen_comment_ids.add(cid)
-                            
                             u_info = c.get('user', {}) or {}
                             uname = u_info.get('unique_id', 'Unknown')
-                            nname = u_info.get('nickname', 'Unknown')
                             txt = c.get('text', '')
+                            sig = f"{uname}_{txt.strip()[:40]}"
+                            
+                            if (cid and cid in seen_comment_ids) or (sig and sig in seen_text_signatures):
+                                continue
+                            if cid: seen_comment_ids.add(cid)
+                            if sig: seen_text_signatures.add(sig)
+                            
+                            nname = u_info.get('nickname', 'Unknown')
                             likes = c.get('digg_count', 0)
                             replies = c.get('reply_comment_total', 0)
                             ctime = c.get('create_time')
@@ -1019,23 +1036,27 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
                 if max_comments > 0 and total_captured >= max_comments:
                     break
 
-        # 2. Fallback DOM
+        # 2. Fallback DOM (Deduplikasi Terhadap API)
         dom_comments = driver.execute_script("""
             let results = [];
             document.querySelectorAll('[data-e2e="comment-level-1"], [class*="DivCommentItemContainer"]').forEach((el, idx) => {
-                let userEl = el.querySelector('a[href*="/@"]') || el.querySelector('[data-e2e="comment-username"]') || {};
-                let textEl = el.querySelector('[data-e2e="comment-level-1-text"]') || el.querySelector('[class*="PCommentText"]') || el;
+                let userEl = el.querySelector('a[href*="/@"], a[data-e2e*="comment-avatar"], [data-e2e*="comment-username"], [class*="SpanUsername"], [class*="SpanNickname"]') || {};
+                let textEl = el.querySelector('[data-e2e="comment-level-1-text"], [class*="PCommentText"], [class*="SpanCommentText"]') || el;
                 let user = (userEl.innerText || '').trim();
                 let user_url = userEl.href || '';
-                let uname = user_url.includes('/@') ? user_url.split('/@')[1].split('?')[0] : user;
+                let uname = user_url.includes('/@') ? user_url.split('/@')[1].split('?')[0] : (user.startsWith('@') ? user.slice(1) : user);
                 let text = (textEl.innerText || '').trim();
-                if (text) {
+                let likeEl = el.querySelector('[data-e2e*="comment-like-count"], [class*="SpanLikeCount"]');
+                let likes = likeEl ? parseInt((likeEl.innerText || '0').replace(/[^0-9]/g, '') || 0) : 0;
+                
+                if (text && text.length > 0) {
                     results.push({
-                        cid: 'dom_' + idx,
+                        cid: 'dom_' + (idx + 1),
                         username: uname || 'Unknown',
                         nickname: user || 'Unknown',
                         user_url: user_url || '',
-                        text: text
+                        text: text,
+                        likes: likes
                     });
                 }
             });
@@ -1044,22 +1065,29 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
         if dom_comments:
             for c in dom_comments:
                 cid = c['cid']
-                if cid not in seen_comment_ids:
-                    seen_comment_ids.add(cid)
-                    dom_prof_url = c.get('user_url') or (f"https://www.tiktok.com/@{c['username']}" if c['username'] != 'Unknown' else "")
-                    c_lang = detect_language(c['text'])
-                    save_to_csv(comments_csv, [
-                        "TikTok", keyword, video_id, p_date, p_author,
-                        p_prof_url, p_desc, p_likes, p_shares, p_plays,
-                        p_comments_count, cid, "Unknown", c['nickname'], c['username'],
-                        dom_prof_url, c['text'], 0, 0, "No",
-                        "", c_lang, p_hashtags, p_location, video_url
-                    ])
-                    new_in_batch += 1
-                    total_captured += 1
-                    print(f"    {w_tag}+ [DOM] @{c['username']}: {c['text'][:40]}...")
-                    if max_comments > 0 and total_captured >= max_comments:
-                        break
+                uname = c['username']
+                txt = c['text']
+                sig = f"{uname}_{txt.strip()[:40]}"
+                
+                if (cid and cid in seen_comment_ids) or (sig and sig in seen_text_signatures):
+                    continue
+                if cid: seen_comment_ids.add(cid)
+                if sig: seen_text_signatures.add(sig)
+                
+                dom_prof_url = c.get('user_url') or (f"https://www.tiktok.com/@{c['username']}" if c['username'] != 'Unknown' else "")
+                c_lang = detect_language(c['text'])
+                save_to_csv(comments_csv, [
+                    "TikTok", keyword, video_id, p_date, p_author,
+                    p_prof_url, p_desc, p_likes, p_shares, p_plays,
+                    p_comments_count, cid, "Unknown", c['nickname'], c['username'],
+                    dom_prof_url, c['text'], c.get('likes', 0), 0, "No",
+                    "", c_lang, p_hashtags, p_location, video_url
+                ])
+                new_in_batch += 1
+                total_captured += 1
+                print(f"    {w_tag}+ [DOM] @{c['username']}: {c['text'][:40]}...")
+                if max_comments > 0 and total_captured >= max_comments:
+                    break
 
         if max_comments > 0 and total_captured >= max_comments:
             break
@@ -1069,7 +1097,7 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
 
         if new_in_batch == 0:
             empty_scrolls += 1
-            if empty_scrolls >= 5:
+            if empty_scrolls >= 6:
                 break
         else:
             empty_scrolls = 0
@@ -1083,11 +1111,15 @@ def scrape_comments_for_video(driver, video_url, video_id, keyword, comments_csv
 
         driver.execute_script("""
             let targets = document.querySelectorAll('[class*="DivCommentMain"], [class*="CommentMain"], [id*="comment" i], [data-e2e="comment-list"]');
-            targets.forEach(el => {
-                el.scrollTop += 1200;
-                el.dispatchEvent(new Event('scroll', { bubbles: true }));
-                el.dispatchEvent(new WheelEvent('wheel', { deltaY: 1200, bubbles: true }));
-            });
+            if (targets.length > 0) {
+                targets.forEach(el => {
+                    el.scrollTop += 1200;
+                    el.dispatchEvent(new Event('scroll', { bubbles: true }));
+                    el.dispatchEvent(new WheelEvent('wheel', { deltaY: 1200, bubbles: true }));
+                });
+            } else {
+                window.scrollBy(0, 1000);
+            }
         """)
         pause_ctrl.sleep(random.uniform(2.0, 3.2))
 
